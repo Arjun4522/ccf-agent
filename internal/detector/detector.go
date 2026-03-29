@@ -78,18 +78,24 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		CFERThreshold:       1.5,
-		TurbulenceThreshold: 0.5,
-		ShockwaveThreshold:  0.8,
-		EntropyThreshold:    3.0, // bits
+		// Thresholds tuned for a busy desktop (browser + editor + terminal).
+		// CFER uses regression slope so idle oscillation averages to ~0;
+		// a sustained attack pushes slope well above 0.5.
+		CFERThreshold:       0.5,  // regression slope units (not point-delta)
+		TurbulenceThreshold: 12.0, // variance; desktop idle easily hits 4–8
+		ShockwaveThreshold:  2.5,  // second derivative; idle oscillates ±1.8
+		EntropyThreshold:    4.5,  // bits; 7 active nodes = 2.8 bits normally
 
-		WarningScore: 0.35,
-		AlertScore:   0.65,
+		WarningScore: 0.40,
+		AlertScore:   0.72,
 
-		CFERWeight:       0.30,
-		TurbulenceWeight: 0.25,
-		ShockwaveWeight:  0.30,
-		EntropyWeight:    0.15,
+		// CFER and shockwave carry more weight — they are the least
+		// contaminated by background noise after the regression fix.
+		// Turbulence weight reduced because desktop turbulence is always high.
+		CFERWeight:       0.45,
+		TurbulenceWeight: 0.10,
+		ShockwaveWeight:  0.35,
+		EntropyWeight:    0.10,
 
 		UseMLClassifier: false,
 	}
@@ -179,9 +185,22 @@ func (d *Detector) evaluate(v features.Vector) (Detection, bool) {
 // thresholdScore computes a weighted composite score in [0, 1] by normalising
 // each feature against its threshold.
 func (d *Detector) thresholdScore(v features.Vector) float64 {
-	cferN  := clamp01(v.CFER / max(d.cfg.CFERThreshold, 1e-9))
+	// Gate CFER and shockwave: negative values mean the field is contracting
+	// (activity slowing down) which is a benign signal, not a ransomware one.
+	// Passing negative values through clamp01 would zero them anyway, but
+	// making the intent explicit also documents why we don't penalise decay.
+	cfer := v.CFER
+	if cfer < 0 {
+		cfer = 0
+	}
+	shock := v.Shockwave
+	if shock < 0 {
+		shock = 0
+	}
+
+	cferN  := clamp01(cfer / max(d.cfg.CFERThreshold, 1e-9))
 	turbN  := clamp01(v.Turbulence / max(d.cfg.TurbulenceThreshold, 1e-9))
-	shockN := clamp01(v.Shockwave / max(d.cfg.ShockwaveThreshold, 1e-9))
+	shockN := clamp01(shock / max(d.cfg.ShockwaveThreshold, 1e-9))
 	entrN  := clamp01(v.Entropy / max(d.cfg.EntropyThreshold, 1e-9))
 
 	return d.cfg.CFERWeight*cferN +

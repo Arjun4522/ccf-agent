@@ -55,22 +55,36 @@ func (e *Extractor) Compute(window []field.Snapshot) (Vector, bool) {
 // Individual feature computations
 // ---------------------------------------------------------------------------
 
-// computeCFER computes the Capability Field Expansion Rate:
+// computeCFER computes the Capability Field Expansion Rate using linear
+// regression slope over the full snapshot window.
 //
-//	CFER = (||F_t|| - ||F_{t-1}||) / dt
+// Using a point derivative (last-2 snapshots) causes false positives because
+// normal background I/O creates alternating +/- spikes that look like attack
+// onset on positive ticks. Linear regression averages out oscillation:
+// idle activity ≈ 0 slope, sustained attack growth ≈ large positive slope.
 //
-// Uses the last two snapshots for the first derivative.
-// Units: intensity per second.
+// Units: intensity per normalised time unit (window index).
 func computeCFER(window []field.Snapshot, norms []float64) float64 {
 	n := len(norms)
-	if n < 2 {
+	if n < 3 {
 		return 0
 	}
-	dt := window[n-1].At.Sub(window[n-2].At).Seconds()
-	if dt <= 0 {
+	// Linear regression: slope of norms vs window index.
+	// Using index (not wall time) avoids sensitivity to snapshot jitter.
+	var sumX, sumY, sumXY, sumX2 float64
+	fn := float64(n)
+	for i, v := range norms {
+		x := float64(i)
+		sumX += x
+		sumY += v
+		sumXY += x * v
+		sumX2 += x * x
+	}
+	denom := fn*sumX2 - sumX*sumX
+	if denom == 0 {
 		return 0
 	}
-	return (norms[n-1] - norms[n-2]) / dt
+	return (fn*sumXY - sumX*sumY) / denom
 }
 
 // computeTurbulence computes the variance of ||F_t|| over the full window.

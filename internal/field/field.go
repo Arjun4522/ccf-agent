@@ -53,12 +53,21 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		DecayRate:         0.92,
-		PropagationFactor: 0.08,
+		// DecayRate lowered from 0.92 → 0.80 so old activity fades faster.
+		// At 0.92 background writes accumulate and keep norm/entropy elevated
+		// for many seconds, making the field indistinguishable from an attack.
+		// At 0.80 a burst of writes decays to <1% in ~20 ticks (~10 s).
+		DecayRate: 0.80,
+
+		// PropagationFactor lowered from 0.08 → 0.03 to stop normal writes
+		// in one directory from artificially inflating neighbour nodes and
+		// driving entropy up on idle workloads.
+		PropagationFactor: 0.03,
+
 		MaxIntensity:      10.0,
-		InactiveThreshold: 0.001,
+		InactiveThreshold: 0.01, // prune sooner to keep node count honest
 		DecayInterval:     500 * time.Millisecond,
-		WindowSize:        20, // 20 × 500 ms = 10-second sliding window
+		WindowSize:        30, // 30 × 500 ms = 15-second window (more regression data)
 		SnapshotInterval:  500 * time.Millisecond,
 	}
 }
