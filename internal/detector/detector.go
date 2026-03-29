@@ -1,16 +1,13 @@
 // Package detector evaluates feature vectors and raises alerts.
 //
 // Two detection modes (selectable at runtime):
-//  1. Threshold — fast, deterministic, no model required. Good for initial
-//     deployment and as a pre-filter before ML inference.
-//  2. ML inference — pluggable interface; implement Classifier to attach any
-//     model (ONNX, TensorFlow Lite, custom scoring function).
-//
-// The detector is the last stage of the pipeline before alerting.
+//  1. Threshold — fast, deterministic, no model required.
+//  2. ML inference — pluggable Classifier interface.
 package detector
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/ccf-agent/internal/features"
@@ -39,63 +36,83 @@ func (s Severity) String() string {
 
 // Detection is raised when the detector triggers.
 type Detection struct {
-	At        time.Time
-	Severity  Severity
-	Score     float64          // composite [0, 1]
-	Vector    features.Vector  // the feature vector that triggered this
-	Reason    string           // human-readable trigger explanation
+	At       time.Time
+	Severity Severity
+	Score    float64         // composite [0, 1]
+	Vector   features.Vector // the feature vector that triggered this
+	Reason   string          // human-readable trigger explanation
 }
 
 // Classifier is the interface for pluggable ML models.
-// Implement this to attach ONNX Runtime, a random forest, or any scorer.
 type Classifier interface {
-	// Score returns a ransomware probability in [0, 1].
 	Score(v features.Vector) (float64, error)
 }
 
 // Config holds detector parameters.
 type Config struct {
-	// Threshold-mode parameters
-	CFERThreshold       float64 // CFER above this triggers WARNING
+	// Per-feature normalisation thresholds.
+	// The composite score is computed as a weighted sum of
+	// clamp01(feature / threshold) for each feature.
+	CFERThreshold       float64
 	TurbulenceThreshold float64
-	ShockwaveThreshold  float64
+	ShockwaveThreshold  float64 // applied after sqrt compression
 	EntropyThreshold    float64
 
-	// Composite score thresholds
-	WarningScore float64 // composite score → WARNING
-	AlertScore   float64 // composite score → ALERT
+	// Composite score thresholds.
+	WarningScore float64
+	AlertScore   float64
 
-	// Weights for composite threshold score (must sum to 1.0)
+	// Feature weights (should sum to 1.0).
 	CFERWeight       float64
 	TurbulenceWeight float64
 	ShockwaveWeight  float64
 	EntropyWeight    float64
 
-	// UseMLClassifier: if true and a Classifier is attached, use its score
-	// instead of the threshold composite.
+	// AlertCooldownTicks: after an ALERT fires, hold minimum WARNING severity
+	// for this many 500 ms ticks. Prevents negative-shockwave oscillations
+	// from silencing the detector mid-attack.
+	AlertCooldownTicks int
+
 	UseMLClassifier bool
 }
 
 func DefaultConfig() Config {
 	return Config{
-		// Thresholds tuned for a busy desktop (browser + editor + terminal).
-		// CFER uses regression slope so idle oscillation averages to ~0;
-		// a sustained attack pushes slope well above 0.5.
-		CFERThreshold:       0.5,  // regression slope units (not point-delta)
-		TurbulenceThreshold: 12.0, // variance; desktop idle easily hits 4–8
-		ShockwaveThreshold:  2.5,  // second derivative; idle oscillates ±1.8
-		EntropyThreshold:    4.5,  // bits; 7 active nodes = 2.8 bits normally
+		// --- Thresholds ---
+		// These are tuned so that the attack values you saw (CFER≈0.5,
+		// turb≈20, shock≈10, entropy≈3.3) normalise well above 1.0 and
+		// clamp to 1.0, while idle values stay well below 1.0.
+		//
+		// CFER: idle regression slope ≈ 0.05–0.15; attack ≈ 0.3–0.6
+		CFERThreshold: 0.3,
+		// Turbulence: idle variance ≈ 1–4; attack ≈ 15–20
+		TurbulenceThreshold: 8.0,
+		// Shockwave threshold is in sqrt-space (raw shock is sqrt'd before
+		// dividing). sqrt(10) ≈ 3.16 so a raw spike of 10 maps to ~1.0.
+		// sqrt(2.0) ≈ 1.41 is the threshold — meaning raw shock of 2.0 = 1.0 normalised.
+		ShockwaveThreshold: 2.0,
+		// Entropy: idle ≈ 2.2–2.5 bits; attack ≈ 3.2–3.5 bits
+		EntropyThreshold: 3.0,
 
+		// --- Score thresholds ---
+		// Idle composite in your logs was ≈ 0.37 (before this fix).
+		// With new thresholds, idle CFER≈0 contributes 0, turb small,
+		// shock oscillates to 0, entropy ≈ 2.2/3.0 * 0.10 ≈ 0.07.
+		// Total idle ≈ 0.10–0.20. Attack should hit 0.7+.
 		WarningScore: 0.40,
-		AlertScore:   0.72,
+		AlertScore:   0.65,
 
-		// CFER and shockwave carry more weight — they are the least
-		// contaminated by background noise after the regression fix.
-		// Turbulence weight reduced because desktop turbulence is always high.
+		// --- Weights ---
+		// CFER is the primary signal — regression slope is very clean.
+		// Shockwave is secondary — good at detecting onset.
+		// Turbulence and entropy are supporting signals.
 		CFERWeight:       0.45,
-		TurbulenceWeight: 0.10,
-		ShockwaveWeight:  0.35,
+		TurbulenceWeight: 0.15,
+		ShockwaveWeight:  0.30,
 		EntropyWeight:    0.10,
+
+		// Hold WARNING for 3 s after ALERT to suppress post-burst oscillation.
+		AlertCooldownTicks: 6,
 
 		UseMLClassifier: false,
 	}
@@ -103,9 +120,10 @@ func DefaultConfig() Config {
 
 // Detector evaluates feature vectors and emits Detection events.
 type Detector struct {
-	cfg        Config
-	log        *zap.Logger
-	classifier Classifier // nil if UseMLClassifier is false
+	cfg           Config
+	log           *zap.Logger
+	classifier    Classifier
+	alertCooldown int // ticks remaining at elevated minimum severity
 }
 
 func New(cfg Config, log *zap.Logger, classifier Classifier) *Detector {
@@ -113,7 +131,6 @@ func New(cfg Config, log *zap.Logger, classifier Classifier) *Detector {
 }
 
 // Run reads feature vectors from in and sends Detections to out when triggered.
-// Returns when ctx is cancelled.
 func (d *Detector) Run(ctx context.Context, in <-chan features.Vector, out chan<- Detection) {
 	for {
 		select {
@@ -153,7 +170,6 @@ func (d *Detector) SetClassifier(c Classifier) {
 // Evaluation logic
 // ---------------------------------------------------------------------------
 
-// evaluate decides whether a feature vector should raise a Detection.
 func (d *Detector) evaluate(v features.Vector) (Detection, bool) {
 	var score float64
 	var err error
@@ -169,6 +185,19 @@ func (d *Detector) evaluate(v features.Vector) (Detection, bool) {
 	}
 
 	sev := d.severity(score)
+
+	// Hysteresis: once ALERT fires, hold minimum WARNING for cooldown ticks.
+	// This prevents negative-shockwave ticks from silencing the detector
+	// while the field is still highly elevated post-burst.
+	if sev == SeverityAlert {
+		d.alertCooldown = d.cfg.AlertCooldownTicks
+	} else if d.alertCooldown > 0 {
+		d.alertCooldown--
+		if sev == SeverityNone {
+			sev = SeverityWarning
+		}
+	}
+
 	if sev == SeverityNone {
 		return Detection{}, false
 	}
@@ -182,25 +211,30 @@ func (d *Detector) evaluate(v features.Vector) (Detection, bool) {
 	}, true
 }
 
-// thresholdScore computes a weighted composite score in [0, 1] by normalising
-// each feature against its threshold.
+// thresholdScore computes a weighted composite score in [0, 1].
+//
+// Shockwave is sqrt-compressed before normalisation:
+//   - Dampens the extreme spike (raw 10 → sqrt 3.16) so it doesn't
+//     dominate the composite and mask the other signals.
+//   - Negative shockwave (field decelerating) is clamped to 0 — that's
+//     a benign signal (burst subsiding), not a ransomware indicator.
 func (d *Detector) thresholdScore(v features.Vector) float64 {
-	// Gate CFER and shockwave: negative values mean the field is contracting
-	// (activity slowing down) which is a benign signal, not a ransomware one.
-	// Passing negative values through clamp01 would zero them anyway, but
-	// making the intent explicit also documents why we don't penalise decay.
 	cfer := v.CFER
 	if cfer < 0 {
 		cfer = 0
 	}
+
 	shock := v.Shockwave
 	if shock < 0 {
 		shock = 0
 	}
+	// sqrt-compress shockwave to reduce oscillation sensitivity.
+	shockSqrt      := math.Sqrt(shock)
+	shockThreshSqrt := math.Sqrt(max(d.cfg.ShockwaveThreshold, 1e-9))
 
 	cferN  := clamp01(cfer / max(d.cfg.CFERThreshold, 1e-9))
 	turbN  := clamp01(v.Turbulence / max(d.cfg.TurbulenceThreshold, 1e-9))
-	shockN := clamp01(shock / max(d.cfg.ShockwaveThreshold, 1e-9))
+	shockN := clamp01(shockSqrt / shockThreshSqrt)
 	entrN  := clamp01(v.Entropy / max(d.cfg.EntropyThreshold, 1e-9))
 
 	return d.cfg.CFERWeight*cferN +
@@ -221,8 +255,6 @@ func (d *Detector) severity(score float64) Severity {
 }
 
 func (d *Detector) buildReason(v features.Vector, score float64) string {
-	// TODO: generate structured reason listing which features exceeded thresholds.
-	// For now return a summary string.
 	return "composite score " + formatScore(score) +
 		" | CFER=" + formatScore(v.CFER) +
 		" turb=" + formatScore(v.Turbulence) +
@@ -231,11 +263,9 @@ func (d *Detector) buildReason(v features.Vector, score float64) string {
 }
 
 // ---------------------------------------------------------------------------
-// Stub ML classifier — replace with real model integration
+// ThresholdClassifier stub
 // ---------------------------------------------------------------------------
 
-// ThresholdClassifier is the default stub that simply wraps the threshold logic.
-// Replace with an ONNX or custom model implementation.
 type ThresholdClassifier struct {
 	cfg Config
 }
@@ -245,8 +275,6 @@ func NewThresholdClassifier(cfg Config) *ThresholdClassifier {
 }
 
 func (tc *ThresholdClassifier) Score(v features.Vector) (float64, error) {
-	// TODO: load and run a real model (e.g. via onnxruntime-go).
-	// Placeholder: delegate to threshold composite.
 	d := &Detector{cfg: tc.cfg}
 	return d.thresholdScore(v), nil
 }
@@ -273,8 +301,6 @@ func max(a, b float64) float64 {
 }
 
 func formatScore(f float64) string {
-	// Simple fixed-point formatting without fmt (avoids import cycle risk).
-	// Caller can swap for strconv.FormatFloat if preferred.
 	const precision = 1000
 	i := int(f*precision + 0.5)
 	return itoa(i/precision) + "." + pad3(i%precision)

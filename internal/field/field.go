@@ -1,13 +1,4 @@
 // Package field implements the Cognitive Capability Field (CCF) data structure.
-//
-// The field F is a sparse map from NodeID → float64 intensity.
-// Each incoming MappedEvent:
-//  1. Increments the target node's intensity by the event weight.
-//  2. Propagates a fraction of that intensity to neighbouring nodes.
-//  3. Decays all node intensities on each tick.
-//
-// The TemporalEngine wraps the Field in a sliding window of snapshots,
-// enabling derivative-based metrics (CFER, shockwave) in the feature layer.
 package field
 
 import (
@@ -20,61 +11,45 @@ import (
 	"go.uber.org/zap"
 )
 
-// ---------------------------------------------------------------------------
-// Field
-// ---------------------------------------------------------------------------
-
 // Config holds tunable field parameters.
 type Config struct {
-	// DecayRate is multiplied against every node intensity on each decay tick.
-	// 0.9 means 10% loss per tick. Range (0, 1).
-	DecayRate float64
-
-	// PropagationFactor is the fraction of a node's intensity that spreads to
-	// each direct neighbour on update. Keep low (0.05–0.15) to avoid saturation.
+	DecayRate         float64
 	PropagationFactor float64
-
-	// MaxIntensity clamps any single node to prevent runaway accumulation.
-	MaxIntensity float64
-
-	// InactiveThreshold: nodes below this value are pruned from the sparse map
-	// during decay to keep memory bounded.
+	MaxIntensity      float64
 	InactiveThreshold float64
-
-	// DecayInterval controls how often the decay pass runs.
-	DecayInterval time.Duration
-
-	// WindowSize is the number of field snapshots the TemporalEngine retains.
-	WindowSize int
-
-	// SnapshotInterval controls how often a snapshot is appended to the window.
-	SnapshotInterval time.Duration
+	DecayInterval     time.Duration
+	WindowSize        int
+	SnapshotInterval  time.Duration
 }
 
 func DefaultConfig() Config {
 	return Config{
-		// DecayRate lowered from 0.92 → 0.80 so old activity fades faster.
-		// At 0.92 background writes accumulate and keep norm/entropy elevated
-		// for many seconds, making the field indistinguishable from an attack.
-		// At 0.80 a burst of writes decays to <1% in ~20 ticks (~10 s).
-		DecayRate: 0.80,
+		// DecayRate 0.85: fast enough to clear idle background (≈15 ticks / 7.5 s
+		// to reach 1% of original), slow enough that the attack burst stays
+		// detectable across the full 30-snapshot regression window.
+		// 0.80 was too aggressive — the attack signal faded before CFER could
+		// build up a positive slope, so regression returned ≈ 0.
+		DecayRate: 0.85,
 
-		// PropagationFactor lowered from 0.08 → 0.03 to stop normal writes
-		// in one directory from artificially inflating neighbour nodes and
-		// driving entropy up on idle workloads.
+		// PropagationFactor 0.03: low enough to avoid false entropy inflation
+		// from single-directory I/O, high enough that ransomware touching many
+		// directories propagates meaningfully across the field.
 		PropagationFactor: 0.03,
 
 		MaxIntensity:      10.0,
-		InactiveThreshold: 0.01, // prune sooner to keep node count honest
+		InactiveThreshold: 0.01,
 		DecayInterval:     500 * time.Millisecond,
-		WindowSize:        30, // 30 × 500 ms = 15-second window (more regression data)
-		SnapshotInterval:  500 * time.Millisecond,
+
+		// 30 snapshots = 15 s regression window. Enough history for CFER slope
+		// to distinguish a sustained attack from a brief burst.
+		WindowSize:       30,
+		SnapshotInterval: 500 * time.Millisecond,
 	}
 }
 
 // Snapshot is an immutable copy of the field at a point in time.
 type Snapshot struct {
-	At         time.Time
+	At          time.Time
 	Intensities map[string]float64
 	Norm        float64 // ||F|| = sqrt(Σ intensity²)
 }
@@ -84,8 +59,6 @@ type Field struct {
 	mu          sync.RWMutex
 	cfg         Config
 	intensities map[string]float64
-	// adjacency holds the neighbourhood graph used for propagation.
-	// Built lazily: two nodes are adjacent if they share a path prefix.
 	adjacency   map[string][]string
 }
 
@@ -102,10 +75,8 @@ func (f *Field) Update(ev event.MappedEvent) {
 	if ev.NodeID == "" {
 		return
 	}
-
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
 	f.increment(ev.NodeID, ev.Weight)
 	f.propagate(ev.NodeID)
 }
@@ -129,7 +100,6 @@ func (f *Field) Snapshot() Snapshot {
 }
 
 // Decay reduces all node intensities and prunes inactive nodes.
-// Called periodically by the TemporalEngine tick.
 func (f *Field) Decay() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -163,8 +133,6 @@ func (f *Field) increment(nodeID string, weight float64) {
 	)
 }
 
-// propagate spreads a fraction of nodeID's current intensity to neighbours.
-// Neighbour discovery uses path-prefix adjacency (lazy, cached).
 func (f *Field) propagate(nodeID string) {
 	neighbours := f.neighbours(nodeID)
 	if len(neighbours) == 0 {
@@ -179,16 +147,10 @@ func (f *Field) propagate(nodeID string) {
 	}
 }
 
-// neighbours returns the cached adjacency list for nodeID.
-// Two nodes are adjacent if one is a path-prefix of the other (depth ±1).
-//
-// TODO: For non-file nodes (proc:*, priv:*) define explicit adjacency rules,
-// e.g. proc:malware.exe → all file nodes it has touched in the last window.
 func (f *Field) neighbours(nodeID string) []string {
 	if nb, ok := f.adjacency[nodeID]; ok {
 		return nb
 	}
-
 	var neighbours []string
 	for other := range f.intensities {
 		if other == nodeID {
@@ -202,23 +164,14 @@ func (f *Field) neighbours(nodeID string) []string {
 	return neighbours
 }
 
-// isAdjacent returns true if a and b share a path prefix at depth ±1.
-// e.g. "/home/user/docs" and "/home/user/images" are adjacent (same parent).
 func isAdjacent(a, b string) bool {
-	// Simple prefix check: one is a prefix of the other or they share a parent.
-	// TODO: Replace with a proper trie for O(1) lookup at scale.
 	if len(a) > len(b) {
 		a, b = b, a
 	}
-	// b is the longer one. Adjacent if b starts with a+"/" (parent-child)
-	// or they share the same directory prefix.
 	if len(b) > len(a) && b[:len(a)] == a && b[len(a)] == '/' {
 		return true
 	}
-	// Same-depth siblings: share parent path.
-	parentA := parentPath(a)
-	parentB := parentPath(b)
-	return parentA != "" && parentA == parentB
+	return parentPath(a) != "" && parentPath(a) == parentPath(b)
 }
 
 func parentPath(p string) string {
@@ -235,13 +188,12 @@ func parentPath(p string) string {
 // ---------------------------------------------------------------------------
 
 // TemporalEngine wraps a Field with a sliding window of Snapshots.
-// It drives the decay/snapshot ticks and exposes the window to the feature layer.
 type TemporalEngine struct {
-	field   *Field
-	cfg     Config
-	log     *zap.Logger
-	mu      sync.RWMutex
-	window  []Snapshot // circular, len ≤ cfg.WindowSize
+	field  *Field
+	cfg    Config
+	log    *zap.Logger
+	mu     sync.RWMutex
+	window []Snapshot
 }
 
 func NewTemporalEngine(field *Field, cfg Config, log *zap.Logger) *TemporalEngine {
@@ -254,7 +206,6 @@ func NewTemporalEngine(field *Field, cfg Config, log *zap.Logger) *TemporalEngin
 }
 
 // Run drives decay and snapshot ticks until ctx is cancelled.
-// Also reads MappedEvents from in and applies them to the field.
 func (te *TemporalEngine) Run(ctx context.Context, in <-chan event.MappedEvent) {
 	decayTicker    := time.NewTicker(te.cfg.DecayInterval)
 	snapshotTicker := time.NewTicker(te.cfg.SnapshotInterval)
@@ -265,16 +216,13 @@ func (te *TemporalEngine) Run(ctx context.Context, in <-chan event.MappedEvent) 
 		select {
 		case <-ctx.Done():
 			return
-
 		case ev, ok := <-in:
 			if !ok {
 				return
 			}
 			te.field.Update(ev)
-
 		case <-decayTicker.C:
 			te.field.Decay()
-
 		case <-snapshotTicker.C:
 			snap := te.field.Snapshot()
 			te.appendSnapshot(snap)
@@ -286,8 +234,7 @@ func (te *TemporalEngine) Run(ctx context.Context, in <-chan event.MappedEvent) 
 	}
 }
 
-// Window returns a copy of the current sliding window of snapshots,
-// oldest first. The caller must not modify the returned slice.
+// Window returns a copy of the current sliding window, oldest first.
 func (te *TemporalEngine) Window() []Snapshot {
 	te.mu.RLock()
 	defer te.mu.RUnlock()
@@ -296,8 +243,7 @@ func (te *TemporalEngine) Window() []Snapshot {
 	return cp
 }
 
-// LatestSnapshot returns the most recent snapshot, or zero value if the
-// window is empty.
+// LatestSnapshot returns the most recent snapshot.
 func (te *TemporalEngine) LatestSnapshot() (Snapshot, bool) {
 	te.mu.RLock()
 	defer te.mu.RUnlock()
@@ -311,7 +257,6 @@ func (te *TemporalEngine) appendSnapshot(s Snapshot) {
 	te.mu.Lock()
 	defer te.mu.Unlock()
 	if len(te.window) >= te.cfg.WindowSize {
-		// Slide: drop oldest.
 		te.window = append(te.window[1:], s)
 	} else {
 		te.window = append(te.window, s)

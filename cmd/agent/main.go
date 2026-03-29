@@ -22,6 +22,7 @@ import (
 	"github.com/ccf-agent/internal/features"
 	"github.com/ccf-agent/internal/field"
 	"github.com/ccf-agent/internal/mapper"
+	"github.com/ccf-agent/internal/responder"
 	"github.com/ccf-agent/pkg/event"
 	"go.uber.org/zap"
 )
@@ -31,13 +32,18 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	flagDebug           = flag.Bool("debug", false, "enable debug logging")
-	flagDecayRate       = flag.Float64("decay-rate", 0.92, "field decay rate per tick (0–1)")
-	flagWindowSize      = flag.Int("window-size", 20, "temporal window size (snapshots)")
+	flagDebug            = flag.Bool("debug", false, "enable debug logging")
+	flagDecayRate        = flag.Float64("decay-rate", 0.85, "field decay rate per tick (0–1)")
+	flagWindowSize       = flag.Int("window-size", 30, "temporal window size (snapshots); 30 × 500 ms = 15 s")
 	flagSnapshotInterval = flag.Duration("snapshot-interval", 500*time.Millisecond, "snapshot interval")
-	flagAlertScore      = flag.Float64("alert-score", 0.65, "composite score threshold for ALERT")
-	flagWarningScore    = flag.Float64("warning-score", 0.35, "composite score threshold for WARNING")
-	flagOutputJSON      = flag.Bool("json", false, "output detections as JSON lines")
+	flagAlertScore       = flag.Float64("alert-score", 0.65, "composite score threshold for ALERT")
+	flagWarningScore     = flag.Float64("warning-score", 0.40, "composite score threshold for WARNING")
+	flagCooldownTicks    = flag.Int("cooldown-ticks", 6, "ticks to hold min WARNING after ALERT fires (hysteresis)")
+	flagOutputJSON       = flag.Bool("json", false, "output detections as JSON lines")
+	flagDryRun           = flag.Bool("dry-run", false, "log blocking actions without executing them")
+	flagKillOnAlert      = flag.Bool("kill-on-alert", true, "SIGKILL offending process on ALERT")
+	flagPauseOnWarn      = flag.Bool("pause-on-warning", true, "SIGSTOP offending process on WARNING")
+	flagQuarantine       = flag.String("quarantine-dir", "/var/lib/ccf-agent/quarantine", "directory for quarantined files")
 )
 
 func main() {
@@ -63,20 +69,24 @@ func main() {
 func run(ctx context.Context, log *zap.Logger) error {
 	// ── configs ──────────────────────────────────────────────────────────────
 	collCfg := collector.DefaultConfig()
-	mapCfg  := mapper.DefaultConfig()
+	mapCfg := mapper.DefaultConfig()
+
 	fieldCfg := field.DefaultConfig()
-	fieldCfg.DecayRate        = *flagDecayRate
-	fieldCfg.WindowSize       = *flagWindowSize
+	fieldCfg.DecayRate = *flagDecayRate
+	fieldCfg.WindowSize = *flagWindowSize
 	fieldCfg.SnapshotInterval = *flagSnapshotInterval
+
 	detCfg := detector.DefaultConfig()
-	detCfg.AlertScore   = *flagAlertScore
+	detCfg.AlertScore = *flagAlertScore
 	detCfg.WarningScore = *flagWarningScore
+	detCfg.AlertCooldownTicks = *flagCooldownTicks
 
 	// ── channels ─────────────────────────────────────────────────────────────
-	rawCh    := make(chan event.RawEvent,    4096)
+	rawCh := make(chan event.RawEvent, 4096)
 	mappedCh := make(chan event.MappedEvent, 4096)
-	vecCh    := make(chan features.Vector,   256)
-	detCh    := make(chan detector.Detection, 64)
+	vecCh := make(chan features.Vector, 256)
+	detCh := make(chan detector.Detection, 64)
+	respCh := make(chan detector.Detection, 64)
 
 	// ── stage construction ───────────────────────────────────────────────────
 	coll, err := collector.New(collCfg, log.Named("collector"))
@@ -86,18 +96,23 @@ func run(ctx context.Context, log *zap.Logger) error {
 	defer coll.Close()
 
 	mpr := mapper.New(mapCfg, log.Named("mapper"))
-
-	f   := field.NewField(fieldCfg)
-	te  := field.NewTemporalEngine(f, fieldCfg, log.Named("temporal"))
-
+	f := field.NewField(fieldCfg)
+	te := field.NewTemporalEngine(f, fieldCfg, log.Named("temporal"))
 	ext := features.New()
-
 	det := detector.New(detCfg, log.Named("detector"),
 		detector.NewThresholdClassifier(detCfg))
 
+	respCfg := responder.DefaultConfig()
+	respCfg.DryRun = *flagDryRun
+	respCfg.KillOnAlert = *flagKillOnAlert
+	respCfg.PauseOnWarning = *flagPauseOnWarn
+	respCfg.QuarantineDir = *flagQuarantine
+
+	resp := responder.New(respCfg, log.Named("responder"))
+
+	go resp.Run(ctx, respCh)
+
 	// ── feature extraction ticker ─────────────────────────────────────────────
-	// The feature extractor is not a streaming stage — it is triggered on a
-	// timer by reading the current window from the TemporalEngine.
 	go func() {
 		ticker := time.NewTicker(fieldCfg.SnapshotInterval)
 		defer ticker.Stop()
@@ -135,7 +150,9 @@ func run(ctx context.Context, log *zap.Logger) error {
 	log.Info("ccf agent running",
 		zap.Float64("alert_score", *flagAlertScore),
 		zap.Float64("warning_score", *flagWarningScore),
+		zap.Float64("decay_rate", *flagDecayRate),
 		zap.Int("window_size", *flagWindowSize),
+		zap.Int("cooldown_ticks", *flagCooldownTicks),
 	)
 
 	for {
@@ -144,6 +161,10 @@ func run(ctx context.Context, log *zap.Logger) error {
 			return nil
 		case d := <-detCh:
 			printDetection(d, *flagOutputJSON)
+			select {
+			case respCh <- d:
+			default:
+			}
 		}
 	}
 }

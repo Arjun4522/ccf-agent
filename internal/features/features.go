@@ -1,28 +1,34 @@
 // Package features computes the CCF detection feature vector from the
 // temporal window of field snapshots.
 //
-// Features implemented (vorticity excluded per design decision):
-//   - CFER  : Capability Field Expansion Rate — how fast total influence grows
+// Features implemented:
+//   - CFER       : Capability Field Expansion Rate — linear regression slope
+//     of ||F_t|| over the window. Idle ≈ 0; attack ≫ 0.
 //   - Turbulence : variance of ||F_t|| over the window — behavioural instability
 //   - Shockwave  : second derivative of ||F_t|| — sudden onset detection
 //   - Entropy    : Shannon entropy of node intensity distribution — spread indicator
 package features
 
 import (
+	"fmt"
 	"math"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ccf-agent/internal/field"
 )
 
-// Vector is the feature vector fed into the ML inference stage.
+// Vector is the feature vector fed into the detector stage.
 type Vector struct {
 	ComputedAt  time.Time
-	CFER        float64 // expansion rate, units: intensity/second
+	CFER        float64 // regression slope of norm over window
 	Turbulence  float64 // variance of norm over window
-	Shockwave   float64 // second derivative of norm (Δ²||F||/Δt²)
-	Entropy     float64 // Shannon entropy H = -Σ p log p
+	Shockwave   float64 // second derivative of norm
+	Entropy     float64 // Shannon entropy H = -Σ p log₂ p
 	ActiveNodes int     // number of nodes with non-zero intensity
+	OffenderPID uint32  // PID of the most active node's process, 0 if unknown
 }
 
 // Extractor computes a feature Vector from a snapshot window.
@@ -43,11 +49,12 @@ func (e *Extractor) Compute(window []field.Snapshot) (Vector, bool) {
 
 	return Vector{
 		ComputedAt:  time.Now(),
-		CFER:        computeCFER(window, norms),
+		CFER:        computeCFER(norms),
 		Turbulence:  computeTurbulence(norms),
 		Shockwave:   computeShockwave(norms),
 		Entropy:     computeEntropy(window[len(window)-1]),
 		ActiveNodes: len(window[len(window)-1].Intensities),
+		OffenderPID: topPID(window[len(window)-1]),
 	}, true
 }
 
@@ -58,19 +65,13 @@ func (e *Extractor) Compute(window []field.Snapshot) (Vector, bool) {
 // computeCFER computes the Capability Field Expansion Rate using linear
 // regression slope over the full snapshot window.
 //
-// Using a point derivative (last-2 snapshots) causes false positives because
-// normal background I/O creates alternating +/- spikes that look like attack
-// onset on positive ticks. Linear regression averages out oscillation:
-// idle activity ≈ 0 slope, sustained attack growth ≈ large positive slope.
-//
-// Units: intensity per normalised time unit (window index).
-func computeCFER(window []field.Snapshot, norms []float64) float64 {
+// Using regression instead of point derivative prevents idle +/- oscillations
+// from triggering false positives. Idle slope ≈ 0; sustained attack > 0.
+func computeCFER(norms []float64) float64 {
 	n := len(norms)
 	if n < 3 {
 		return 0
 	}
-	// Linear regression: slope of norms vs window index.
-	// Using index (not wall time) avoids sensitivity to snapshot jitter.
 	var sumX, sumY, sumXY, sumX2 float64
 	fn := float64(n)
 	for i, v := range norms {
@@ -106,18 +107,16 @@ func computeTurbulence(norms []float64) float64 {
 
 // computeShockwave computes the second derivative of ||F_t|| at the latest point.
 //
-//	Shock = (||F_{t}|| - 2·||F_{t-1}|| + ||F_{t-2}||) / dt²
+//	Shock = ||F_{t}|| - 2·||F_{t-1}|| + ||F_{t-2}||
 //
-// A large positive value indicates sudden field acceleration — attack onset.
+// Positive = sudden acceleration (attack onset). Negative = decelerating
+// (burst subsiding) — clamped to 0 in the detector before scoring.
 func computeShockwave(norms []float64) float64 {
 	n := len(norms)
 	if n < 3 {
 		return 0
 	}
-	// Use uniform time spacing assumption (dt = 1 normalised unit) for simplicity.
-	// TODO: use actual snapshot timestamps for variable-rate accuracy.
-	d2 := norms[n-1] - 2*norms[n-2] + norms[n-3]
-	return d2 // positive = accelerating expansion (shockwave)
+	return norms[n-1] - 2*norms[n-2] + norms[n-3]
 }
 
 // computeEntropy computes Shannon entropy of the node intensity distribution
@@ -131,8 +130,6 @@ func computeEntropy(snap field.Snapshot) float64 {
 	if len(snap.Intensities) == 0 || snap.Norm == 0 {
 		return 0
 	}
-
-	// Sum of intensities (L1 norm for probability normalisation).
 	var total float64
 	for _, v := range snap.Intensities {
 		total += v
@@ -140,7 +137,6 @@ func computeEntropy(snap field.Snapshot) float64 {
 	if total == 0 {
 		return 0
 	}
-
 	var h float64
 	for _, v := range snap.Intensities {
 		p := v / total
@@ -155,11 +151,49 @@ func computeEntropy(snap field.Snapshot) float64 {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// extractNorms pulls the pre-computed ||F|| value from each snapshot.
 func extractNorms(window []field.Snapshot) []float64 {
 	norms := make([]float64, len(window))
 	for i, s := range window {
 		norms[i] = s.Norm
 	}
 	return norms
+}
+
+// topPID finds the PID of the process behind the highest-intensity node.
+func topPID(snap field.Snapshot) uint32 {
+	var topNode string
+	var topVal float64
+	for node, v := range snap.Intensities {
+		if v > topVal {
+			topVal = v
+			topNode = node
+		}
+	}
+	if !strings.HasPrefix(topNode, "proc:") {
+		return 0
+	}
+	comm := strings.TrimPrefix(topNode, "proc:")
+	return findPIDByComm(comm)
+}
+
+// findPIDByComm scans /proc for a process with the given comm name.
+func findPIDByComm(comm string) uint32 {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		pid, err := strconv.ParseUint(e.Name(), 10, 32)
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(data)) == comm {
+			return uint32(pid)
+		}
+	}
+	return 0
 }
