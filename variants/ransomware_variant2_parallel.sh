@@ -1,7 +1,7 @@
 TARGET_DIR="/home/arjun/Desktop/ccf-agent-nixos/ransomware_test/variant2"
 NUM_FILES=500
 ENCRYPTION_DELAY=0.1
-PARALLEL_PROCS=3
+PARALLEL_PROCS=5
 echo "Starting ransomware simulation variant (multi-process)..."
 echo "Target directory: $TARGET_DIR"
 echo "CCF Agent should detect and block this"

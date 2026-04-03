@@ -50,71 +50,54 @@ type Classifier interface {
 
 // Config holds detector parameters.
 type Config struct {
-	// Per-feature normalisation thresholds.
-	// The composite score is computed as a weighted sum of
-	// clamp01(feature / threshold) for each feature.
 	CFERThreshold       float64
 	TurbulenceThreshold float64
-	ShockwaveThreshold  float64 // applied after sqrt compression
+	ShockwaveThreshold  float64
 	EntropyThreshold    float64
 
-	// Composite score thresholds.
 	WarningScore float64
 	AlertScore   float64
 
-	// Feature weights (should sum to 1.0).
 	CFERWeight       float64
 	TurbulenceWeight float64
 	ShockwaveWeight  float64
 	EntropyWeight    float64
 
-	// AlertCooldownTicks: after an ALERT fires, hold minimum WARNING severity
-	// for this many 500 ms ticks. Prevents negative-shockwave oscillations
-	// from silencing the detector mid-attack.
 	AlertCooldownTicks int
 
 	UseMLClassifier bool
+
+	FastWindowSize    int
+	SlowWindowSize    int
+	MinDataPoints     int
+	FastThreshold     float64
+	ConfirmMultiplier float64
 }
 
 func DefaultConfig() Config {
 	return Config{
-		// --- Thresholds ---
-		// These are tuned so that the attack values you saw (CFER≈0.5,
-		// turb≈20, shock≈10, entropy≈3.3) normalise well above 1.0 and
-		// clamp to 1.0, while idle values stay well below 1.0.
-		//
-		// CFER: idle regression slope ≈ 0.05–0.15; attack ≈ 0.3–0.6
-		CFERThreshold: 0.3,
-		// Turbulence: idle variance ≈ 1–4; attack ≈ 15–20
+		CFERThreshold:       0.3,
 		TurbulenceThreshold: 8.0,
-		// Shockwave threshold is in sqrt-space (raw shock is sqrt'd before
-		// dividing). sqrt(10) ≈ 3.16 so a raw spike of 10 maps to ~1.0.
-		// sqrt(2.0) ≈ 1.41 is the threshold — meaning raw shock of 2.0 = 1.0 normalised.
-		ShockwaveThreshold: 2.0,
-		// Entropy: idle ≈ 2.2–2.5 bits; attack ≈ 3.2–3.5 bits
-		EntropyThreshold: 3.0,
+		ShockwaveThreshold:  2.0,
+		EntropyThreshold:    3.0,
 
-		// --- Score thresholds ---
-		// Idle composite in your logs was ≈ 0.37 (before this fix).
-		// With new thresholds, idle CFER≈0 contributes 0, turb small,
-		// shock oscillates to 0, entropy ≈ 2.2/3.0 * 0.10 ≈ 0.07.
-		// Total idle ≈ 0.10–0.20. Attack should hit 0.7+.
 		WarningScore: 0.40,
 		AlertScore:   0.65,
 
-		// --- Weights ---
-		// CFER is the primary signal — regression slope is very clean.
-		// Shockwave is secondary — good at detecting onset.
-		// Turbulence and entropy are supporting signals.
 		CFERWeight:       0.45,
 		TurbulenceWeight: 0.15,
 		ShockwaveWeight:  0.30,
 		EntropyWeight:    0.10,
 
-		// Hold WARNING for 3 s after ALERT to suppress post-burst oscillation.
-		AlertCooldownTicks: 6,
+		AlertCooldownTicks: 60,
 
 		UseMLClassifier: false,
+
+		FastWindowSize:    10,
+		SlowWindowSize:    30,
+		MinDataPoints:     5,
+		FastThreshold:     0.30,
+		ConfirmMultiplier: 1.5,
 	}
 }
 
@@ -184,7 +167,7 @@ func (d *Detector) evaluate(v features.Vector) (Detection, bool) {
 		score = d.thresholdScore(v)
 	}
 
-	sev := d.severity(score)
+	sev := d.severityMultiScale(score)
 
 	// Hysteresis: once ALERT fires, hold minimum WARNING for cooldown ticks.
 	// This prevents negative-shockwave ticks from silencing the detector
@@ -229,13 +212,13 @@ func (d *Detector) thresholdScore(v features.Vector) float64 {
 		shock = 0
 	}
 	// sqrt-compress shockwave to reduce oscillation sensitivity.
-	shockSqrt      := math.Sqrt(shock)
+	shockSqrt := math.Sqrt(shock)
 	shockThreshSqrt := math.Sqrt(max(d.cfg.ShockwaveThreshold, 1e-9))
 
-	cferN  := clamp01(cfer / max(d.cfg.CFERThreshold, 1e-9))
-	turbN  := clamp01(v.Turbulence / max(d.cfg.TurbulenceThreshold, 1e-9))
+	cferN := clamp01(cfer / max(d.cfg.CFERThreshold, 1e-9))
+	turbN := clamp01(v.Turbulence / max(d.cfg.TurbulenceThreshold, 1e-9))
 	shockN := clamp01(shockSqrt / shockThreshSqrt)
-	entrN  := clamp01(v.Entropy / max(d.cfg.EntropyThreshold, 1e-9))
+	entrN := clamp01(v.Entropy / max(d.cfg.EntropyThreshold, 1e-9))
 
 	return d.cfg.CFERWeight*cferN +
 		d.cfg.TurbulenceWeight*turbN +
@@ -252,6 +235,20 @@ func (d *Detector) severity(score float64) Severity {
 	default:
 		return SeverityNone
 	}
+}
+
+func (d *Detector) severityMultiScale(score float64) Severity {
+	if score >= d.cfg.AlertScore {
+		return SeverityAlert
+	}
+	if score >= d.cfg.FastThreshold {
+		confirmThreshold := d.cfg.FastThreshold * d.cfg.ConfirmMultiplier
+		if score >= confirmThreshold {
+			return SeverityAlert
+		}
+		return SeverityWarning
+	}
+	return SeverityNone
 }
 
 func (d *Detector) buildReason(v features.Vector, score float64) string {

@@ -60,6 +60,14 @@ type Config struct {
 	// CooldownWindow: don't act on the same PID twice within this window.
 	CooldownWindow time.Duration
 
+	// RespawnWindow: track and re-alert if the same script path is executed
+	// again within this window after being killed.
+	RespawnWindow time.Duration
+
+	// BlockRespawnedScripts: rename suspicious script files after killing
+	// to prevent re-execution (anti-respawn mechanism).
+	BlockRespawnedScripts bool
+
 	// AllowlistComms: process names that will never be acted on.
 	// e.g. ["systemd", "sshd", "journald", "NetworkManager"]
 	AllowlistComms []string
@@ -84,14 +92,16 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		QuarantineDir:   "/var/lib/ccf-agent/quarantine",
-		EvidenceDir:     "/var/lib/ccf-agent/evidence",
-		KillOnAlert:     true,
-		KillProcessTree: true,
-		PauseOnWarning:  true,
-		IsolateNetwork:  false, // opt-in — has side effects
-		ResumeWindow:    10 * time.Second,
-		CooldownWindow:  30 * time.Second,
+		QuarantineDir:         "/var/lib/ccf-agent/quarantine",
+		EvidenceDir:           "/var/lib/ccf-agent/evidence",
+		KillOnAlert:           true,
+		KillProcessTree:       true,
+		PauseOnWarning:        true,
+		IsolateNetwork:        false, // opt-in — has side effects
+		ResumeWindow:          10 * time.Second,
+		CooldownWindow:        30 * time.Second,
+		RespawnWindow:         5 * time.Minute, // track scripts for 5 minutes after kill
+		BlockRespawnedScripts: true,            // rename script files to prevent respawn
 		AllowlistComms: []string{
 			"systemd", "systemd-journal", "systemd-udevd",
 			"sshd", "journald", "NetworkManager",
@@ -121,6 +131,9 @@ type Responder struct {
 	allowlistPIDs  map[uint32]bool
 	httpClient     *http.Client
 	syslogWriter   *syslog.Writer // nil if UseSyslog=false
+	// Respawn tracking: tracks recently killed script paths to detect re-execution
+	// Key: resolved script path, Value: last kill time
+	killedScripts map[string]time.Time
 }
 
 func New(cfg Config, log *zap.Logger) *Responder {
@@ -142,6 +155,7 @@ func New(cfg Config, log *zap.Logger) *Responder {
 		allowlistComms: comms,
 		allowlistPIDs:  pids,
 		httpClient:     &http.Client{Timeout: cfg.WebhookTimeout},
+		killedScripts:  make(map[string]time.Time),
 	}
 
 	if cfg.UseSyslog {
@@ -217,6 +231,26 @@ func (r *Responder) handle(det detector.Detection) {
 		)
 	}
 
+	// Respawn detection: check if this script was recently killed
+	scriptPath := r.getScriptPath(targetPID)
+	if scriptPath != "" {
+		r.mu.Lock()
+		if lastKill, wasKilled := r.killedScripts[scriptPath]; wasKilled {
+			if time.Since(lastKill) < r.cfg.RespawnWindow {
+				r.log.Warn("RESPAWN DETECTED — script re-executed after recent kill",
+					zap.String("script", scriptPath),
+					zap.Uint32("pid", targetPID),
+					zap.Duration("since_last_kill", time.Since(lastKill)),
+				)
+				// Immediately escalate: skip cooldown, block the script
+				if r.cfg.BlockRespawnedScripts {
+					r.blockScript(scriptPath)
+				}
+			}
+		}
+		r.mu.Unlock()
+	}
+
 	// Cooldown — don't hammer the same PID.
 	r.mu.Lock()
 	if last, ok := r.actioned[targetPID]; ok && time.Since(last) < r.cfg.CooldownWindow {
@@ -277,13 +311,126 @@ func (r *Responder) commForPID(pid uint32) string {
 
 // killProcessTree sends SIGKILL to pid and all its descendants.
 // It walks /proc once to build the parent→children map, then does a
-// depth-first traversal starting from pid.
+// depth-first traversal starting from pid. Also kills the process group
+// to handle parallel subshells spawned with (...) syntax.
 func (r *Responder) killProcessTree(rootPID uint32, det detector.Detection) {
+	// Track the script path for respawn detection
+	scriptPath := r.getScriptPath(rootPID)
+
+	// First, try to kill the entire process group (handles parallel ransomware)
+	r.killProcessGroup(rootPID, det)
+
 	children := r.buildChildMap()
 	pids := collectDescendants(rootPID, children)
 	// Kill leaves first, then root — avoids parent re-spawning children.
 	for i := len(pids) - 1; i >= 0; i-- {
 		r.killPID(pids[i], det)
+	}
+
+	// Track killed script for respawn detection
+	if scriptPath != "" {
+		r.mu.Lock()
+		r.killedScripts[scriptPath] = time.Now()
+		r.mu.Unlock()
+	}
+}
+
+// killProcessGroup sends SIGKILL to all processes in the same process group
+// as pid. This catches parallel subshells spawned with (...) syntax.
+func (r *Responder) killProcessGroup(pid uint32, det detector.Detection) {
+	pgid, err := getProcessGroupID(pid)
+	if err != nil {
+		r.log.Debug("could not get PGID for process group kill",
+			zap.Uint32("pid", pid),
+			zap.Error(err),
+		)
+		return
+	}
+	// Skip if already group 1 (init/systemd territory)
+	if pgid == 1 {
+		return
+	}
+
+	r.log.Warn("KILLING process group (SIGKILL)",
+		zap.Uint32("pid", pid),
+		zap.Int("pgid", pgid),
+		zap.String("severity", det.Severity.String()),
+	)
+
+	if r.cfg.DryRun {
+		return
+	}
+
+	// kill -9 -<pgid> kills all processes in the group
+	cmd := exec.Command("kill", "-9", "-"+strconv.Itoa(pgid))
+	if err := cmd.Run(); err != nil {
+		r.log.Error("process group kill failed",
+			zap.Int("pgid", pgid),
+			zap.Error(err),
+		)
+	}
+}
+
+// getProcessGroupID returns the process group ID for a given PID.
+func getProcessGroupID(pid uint32) (int, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	// Format: pid (comm) state ppid pgrp session tty_nr tpgid ...
+	// Extract pgrp (5th field after comm in parentheses)
+	fields := strings.Fields(string(data))
+	if len(fields) < 5 {
+		return 0, fmt.Errorf("unexpected stat format")
+	}
+	pgid, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return 0, err
+	}
+	return pgid, nil
+}
+
+// getScriptPath returns the resolved path of the executable for a given PID.
+// This is used to track scripts that have been killed and detect respawns.
+func (r *Responder) getScriptPath(pid uint32) string {
+	// Read the symlink /proc/<pid>/exe to get the executable path
+	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		return ""
+	}
+	// If it's a symlink to a deleted file (like a script), read cmdline
+	if strings.HasSuffix(exePath, " (deleted)") {
+		exePath = strings.TrimSuffix(exePath, " (deleted)")
+	}
+	// Read cmdline to get the actual script path
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return exePath
+	}
+	// cmdline is null-separated, first field is the script/binary path
+	scriptPath := strings.Split(string(cmdline), "\x00")[0]
+	if scriptPath != "" {
+		return scriptPath
+	}
+	return exePath
+}
+
+// blockScript renames a suspicious script to prevent re-execution.
+// Appends ".ccf-blocked-<timestamp>" to the filename.
+func (r *Responder) blockScript(scriptPath string) {
+	if scriptPath == "" || r.cfg.DryRun {
+		return
+	}
+	blockedPath := scriptPath + ".ccf-blocked-" + strconv.FormatInt(time.Now().Unix(), 10)
+	r.log.Warn("BLOCKING script to prevent respawn",
+		zap.String("original", scriptPath),
+		zap.String("blocked_to", blockedPath),
+	)
+	if err := os.Rename(scriptPath, blockedPath); err != nil {
+		r.log.Error("failed to block script",
+			zap.String("script", scriptPath),
+			zap.Error(err),
+		)
 	}
 }
 

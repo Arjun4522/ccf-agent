@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ccf-agent/internal/field"
@@ -32,11 +33,129 @@ type Vector struct {
 	ParentPID   uint32  // Parent PID of the offender (for process tree kills)
 }
 
+type RunningCFER struct {
+	mu        sync.RWMutex
+	n         int
+	sumX      float64
+	sumY      float64
+	sumXY     float64
+	sumX2     float64
+	points    []float64
+	maxPoints int
+}
+
+func NewRunningCFER(maxPoints int) *RunningCFER {
+	return &RunningCFER{
+		maxPoints: maxPoints,
+		points:    make([]float64, 0, maxPoints),
+	}
+}
+
+func (r *RunningCFER) Add(y float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.n++
+	r.sumY += y
+	r.sumX2 += float64(r.n * r.n)
+	r.sumX += float64(r.n)
+	r.sumXY += float64(r.n) * y
+
+	r.points = append(r.points, y)
+	if len(r.points) > r.maxPoints {
+		r.points = r.points[1:]
+		r.n = len(r.points)
+		r.recalc()
+	}
+}
+
+func (r *RunningCFER) recalc() {
+	r.sumX = 0
+	r.sumY = 0
+	r.sumXY = 0
+	r.sumX2 = 0
+	for i, v := range r.points {
+		x := float64(i + 1)
+		r.sumX += x
+		r.sumY += v
+		r.sumXY += x * v
+		r.sumX2 += x * x
+	}
+}
+
+func (r *RunningCFER) Slope() float64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.n < 2 {
+		return 0
+	}
+	denom := float64(r.n)*r.sumX2 - r.sumX*r.sumX
+	if denom == 0 {
+		return 0
+	}
+	return (float64(r.n)*r.sumXY - r.sumX*r.sumY) / denom
+}
+
+func (r *RunningCFER) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.n
+}
+
 // Extractor computes a feature Vector from a snapshot window.
 // It is stateless and goroutine-safe.
-type Extractor struct{}
+type Extractor struct {
+	runningCFER *RunningCFER
+}
 
 func New() *Extractor { return &Extractor{} }
+
+func NewWithStreaming(maxPoints int) *Extractor {
+	return &Extractor{
+		runningCFER: NewRunningCFER(maxPoints),
+	}
+}
+
+func (e *Extractor) ComputeWithStreaming(snap field.Snapshot, window []field.Snapshot) (Vector, bool) {
+	if e.runningCFER == nil {
+		e.runningCFER = NewRunningCFER(150)
+	}
+
+	e.runningCFER.Add(snap.Norm)
+
+	norms := extractNorms(window)
+
+	offenderPID := topPID(snap)
+	parentPID := parentPIDForPID(offenderPID)
+
+	hasEnoughPoints := e.runningCFER.Count() >= 5
+	cfer := e.runningCFER.Slope()
+
+	if len(norms) < 3 {
+		return Vector{
+			ComputedAt:  time.Now(),
+			CFER:        cfer,
+			Turbulence:  0,
+			Shockwave:   0,
+			Entropy:     computeEntropy(snap),
+			ActiveNodes: len(snap.Intensities),
+			OffenderPID: offenderPID,
+			ParentPID:   parentPID,
+		}, hasEnoughPoints
+	}
+
+	return Vector{
+		ComputedAt:  time.Now(),
+		CFER:        cfer,
+		Turbulence:  computeTurbulence(norms),
+		Shockwave:   computeShockwave(norms),
+		Entropy:     computeEntropy(snap),
+		ActiveNodes: len(snap.Intensities),
+		OffenderPID: offenderPID,
+		ParentPID:   parentPID,
+	}, hasEnoughPoints
+}
 
 // Compute derives a feature Vector from the provided snapshot window.
 // Returns false if the window is too short for meaningful computation

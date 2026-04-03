@@ -31,6 +31,11 @@ type Config struct {
 	// CryptoExtensions is the set of file extensions that trigger a CapCrypto
 	// capability (ransomware commonly writes encrypted files with custom extensions).
 	CryptoExtensions []string
+
+	// SuspiciousBinaries is a set of binary names that are commonly used by
+	// ransomware (openssl, gpg, ccencrypt, etc.) and should receive elevated
+	// weight for early detection.
+	SuspiciousBinaries []string
 }
 
 func DefaultConfig() Config {
@@ -40,6 +45,10 @@ func DefaultConfig() Config {
 			".enc", ".locked", ".crypt", ".crypted", ".encrypted",
 			".vault", ".pay", ".ransom",
 		},
+		SuspiciousBinaries: []string{
+			"openssl", "gpg", "gpg2", "ccencrypt", "age", "sops",
+			"encrypt", "decrypt", "cryptsetup", "veracrypt",
+		},
 	}
 }
 
@@ -48,6 +57,7 @@ type Mapper struct {
 	cfg        Config
 	log        *zap.Logger
 	cryptoExts map[string]struct{}
+	suspicious map[string]struct{}
 }
 
 func New(cfg Config, log *zap.Logger) *Mapper {
@@ -55,7 +65,11 @@ func New(cfg Config, log *zap.Logger) *Mapper {
 	for _, e := range cfg.CryptoExtensions {
 		exts[strings.ToLower(e)] = struct{}{}
 	}
-	return &Mapper{cfg: cfg, log: log, cryptoExts: exts}
+	susp := make(map[string]struct{}, len(cfg.SuspiciousBinaries))
+	for _, b := range cfg.SuspiciousBinaries {
+		susp[b] = struct{}{}
+	}
+	return &Mapper{cfg: cfg, log: log, cryptoExts: exts, suspicious: susp}
 }
 
 // Run reads from in, maps each event, and writes to out.
@@ -135,6 +149,10 @@ func (m *Mapper) resolveCapability(raw event.RawEvent) (event.Capability, bool) 
 		return event.CapDelete, true
 
 	case event.Exec:
+		// Suspicious binaries (openssl, gpg, etc.) are a strong ransomware indicator.
+		if m.isSuspiciousBinary(raw.ProcessName) {
+			return event.CapCrypto, true
+		}
 		return event.CapExec, true
 
 	case event.SetUID:
@@ -197,5 +215,10 @@ func (m *Mapper) clusterPath(path string) string {
 func (m *Mapper) hasCryptoExt(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	_, ok := m.cryptoExts[ext]
+	return ok
+}
+
+func (m *Mapper) isSuspiciousBinary(name string) bool {
+	_, ok := m.suspicious[name]
 	return ok
 }

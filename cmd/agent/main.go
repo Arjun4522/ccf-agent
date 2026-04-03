@@ -30,12 +30,19 @@ var (
 	// Detection
 	flagDebug            = flag.Bool("debug", false, "enable debug logging")
 	flagDecayRate        = flag.Float64("decay-rate", 0.85, "field decay rate per tick (0–1)")
-	flagWindowSize       = flag.Int("window-size", 30, "temporal window size (snapshots)")
-	flagSnapshotInterval = flag.Duration("snapshot-interval", 500*time.Millisecond, "snapshot/tick interval")
+	flagWindowSize       = flag.Int("window-size", 12, "temporal window size (snapshots)")
+	flagSnapshotInterval = flag.Duration("snapshot-interval", 100*time.Millisecond, "snapshot/tick interval")
 	flagAlertScore       = flag.Float64("alert-score", 0.65, "composite score threshold for ALERT")
 	flagWarningScore     = flag.Float64("warning-score", 0.40, "composite score threshold for WARNING")
-	flagCooldownTicks    = flag.Int("cooldown-ticks", 6, "hysteresis ticks after ALERT")
+	flagCooldownTicks    = flag.Int("cooldown-ticks", 60, "hysteresis ticks after ALERT (for wave attack handling)")
 	flagOutputJSON       = flag.Bool("json", false, "output detections as JSON lines")
+
+	// Multi-scale detection
+	flagFastWindowSize    = flag.Int("fast-window-size", 10, "fast detection window size (snapshots)")
+	flagSlowWindowSize    = flag.Int("slow-window-size", 30, "slow confirmation window size (snapshots)")
+	flagMinDataPoints     = flag.Int("min-data-points", 5, "minimum data points for streaming detection")
+	flagFastThreshold     = flag.Float64("fast-threshold", 0.30, "fast path warning threshold")
+	flagConfirmMultiplier = flag.Float64("confirm-multiplier", 1.5, "multiplier for fast threshold to confirm alert")
 
 	// Blocking — basic
 	flagDryRun      = flag.Bool("dry-run", false, "log actions without executing")
@@ -44,10 +51,12 @@ var (
 	flagQuarantine  = flag.String("quarantine-dir", "/var/lib/ccf-agent/quarantine", "quarantine directory")
 
 	// Blocking — enhanced
-	flagKillTree       = flag.Bool("kill-tree", true, "kill entire process tree, not just root PID")
-	flagIsolateNetwork = flag.Bool("isolate-network", false, "add iptables DROP rule for offending UID (requires root)")
-	flagEvidenceDir    = flag.String("evidence-dir", "/var/lib/ccf-agent/evidence", "directory for forensic snapshots")
-	flagAllowlist      = flag.String("allowlist-comms", "", "comma-separated process names to never act on")
+	flagKillTree              = flag.Bool("kill-tree", true, "kill entire process tree, not just root PID")
+	flagIsolateNetwork        = flag.Bool("isolate-network", false, "add iptables DROP rule for offending UID (requires root)")
+	flagEvidenceDir           = flag.String("evidence-dir", "/var/lib/ccf-agent/evidence", "directory for forensic snapshots")
+	flagAllowlist             = flag.String("allowlist-comms", "", "comma-separated process names to never act on")
+	flagBlockRespawnedScripts = flag.Bool("block-respawned-scripts", true, "rename scripts after killing to prevent respawn")
+	flagRespawnWindow         = flag.Duration("respawn-window", 5*time.Minute, "track and re-alert if same script re-executes within this window")
 
 	// Alerting
 	flagWebhookURL = flag.String("webhook-url", "", "HTTP endpoint for JSON alert POSTs (Slack/PagerDuty/etc.)")
@@ -87,6 +96,11 @@ func run(ctx context.Context, log *zap.Logger) error {
 	detCfg.AlertScore = *flagAlertScore
 	detCfg.WarningScore = *flagWarningScore
 	detCfg.AlertCooldownTicks = *flagCooldownTicks
+	detCfg.FastWindowSize = *flagFastWindowSize
+	detCfg.SlowWindowSize = *flagSlowWindowSize
+	detCfg.MinDataPoints = *flagMinDataPoints
+	detCfg.FastThreshold = *flagFastThreshold
+	detCfg.ConfirmMultiplier = *flagConfirmMultiplier
 
 	// Build responder config from flags.
 	respCfg := responder.DefaultConfig()
@@ -99,6 +113,8 @@ func run(ctx context.Context, log *zap.Logger) error {
 	respCfg.EvidenceDir = *flagEvidenceDir
 	respCfg.WebhookURL = *flagWebhookURL
 	respCfg.UseSyslog = *flagUseSyslog
+	respCfg.BlockRespawnedScripts = *flagBlockRespawnedScripts
+	respCfg.RespawnWindow = *flagRespawnWindow
 
 	if *flagAllowlist != "" {
 		extra := strings.Split(*flagAllowlist, ",")
@@ -122,7 +138,7 @@ func run(ctx context.Context, log *zap.Logger) error {
 	mpr := mapper.New(mapCfg, log.Named("mapper"))
 	f := field.NewField(fieldCfg)
 	te := field.NewTemporalEngine(f, fieldCfg, log.Named("temporal"))
-	ext := features.New()
+	ext := features.NewWithStreaming(detCfg.SlowWindowSize)
 	det := detector.New(detCfg, log.Named("detector"), detector.NewThresholdClassifier(detCfg))
 	resp := responder.New(respCfg, log.Named("responder"))
 
@@ -138,7 +154,11 @@ func run(ctx context.Context, log *zap.Logger) error {
 				return
 			case <-ticker.C:
 				window := te.Window()
-				vec, ok := ext.Compute(window)
+				snap, ok := te.LatestSnapshot()
+				if !ok {
+					continue
+				}
+				vec, ok := ext.ComputeWithStreaming(snap, window)
 				if !ok {
 					continue
 				}
