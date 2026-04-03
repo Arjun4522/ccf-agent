@@ -58,4 +58,5 @@ type MappedEvent struct {
 	Capability Capability
 	NodeID     string  // canonical node identifier resolved by the mapper
 	Weight     float64 // pre-looked-up from CapabilityWeight
+	PPID       uint32  // parent PID for process tree analysis
 }

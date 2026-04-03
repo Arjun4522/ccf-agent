@@ -99,6 +99,7 @@ func (m *Mapper) mapEvent(raw event.RawEvent) (event.MappedEvent, bool) {
 		Capability: cap,
 		NodeID:     nodeID,
 		Weight:     event.CapabilityWeight[cap],
+		PPID:       raw.PPID,
 	}, true
 }
 

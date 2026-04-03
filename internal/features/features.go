@@ -29,6 +29,7 @@ type Vector struct {
 	Entropy     float64 // Shannon entropy H = -Σ p log₂ p
 	ActiveNodes int     // number of nodes with non-zero intensity
 	OffenderPID uint32  // PID of the most active node's process, 0 if unknown
+	ParentPID   uint32  // Parent PID of the offender (for process tree kills)
 }
 
 // Extractor computes a feature Vector from a snapshot window.
@@ -47,6 +48,9 @@ func (e *Extractor) Compute(window []field.Snapshot) (Vector, bool) {
 
 	norms := extractNorms(window)
 
+	offenderPID := topPID(window[len(window)-1])
+	parentPID := parentPIDForPID(offenderPID)
+
 	return Vector{
 		ComputedAt:  time.Now(),
 		CFER:        computeCFER(norms),
@@ -54,7 +58,8 @@ func (e *Extractor) Compute(window []field.Snapshot) (Vector, bool) {
 		Shockwave:   computeShockwave(norms),
 		Entropy:     computeEntropy(window[len(window)-1]),
 		ActiveNodes: len(window[len(window)-1].Intensities),
-		OffenderPID: topPID(window[len(window)-1]),
+		OffenderPID: offenderPID,
+		ParentPID:   parentPID,
 	}, true
 }
 
@@ -193,6 +198,31 @@ func findPIDByComm(comm string) uint32 {
 		}
 		if strings.TrimSpace(string(data)) == comm {
 			return uint32(pid)
+		}
+	}
+	return 0
+}
+
+// parentPIDForPID reads the parent PID of the given process from /proc/<pid>/status.
+func parentPIDForPID(pid uint32) uint32 {
+	if pid == 0 {
+		return 0
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "PPid:") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				return 0
+			}
+			ppid, err := strconv.ParseUint(fields[1], 10, 32)
+			if err != nil {
+				return 0
+			}
+			return uint32(ppid)
 		}
 	}
 	return 0

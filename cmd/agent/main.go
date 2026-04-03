@@ -50,8 +50,8 @@ var (
 	flagAllowlist      = flag.String("allowlist-comms", "", "comma-separated process names to never act on")
 
 	// Alerting
-	flagWebhookURL  = flag.String("webhook-url", "", "HTTP endpoint for JSON alert POSTs (Slack/PagerDuty/etc.)")
-	flagUseSyslog   = flag.Bool("syslog", false, "emit detections to system syslog")
+	flagWebhookURL = flag.String("webhook-url", "", "HTTP endpoint for JSON alert POSTs (Slack/PagerDuty/etc.)")
+	flagUseSyslog  = flag.Bool("syslog", false, "emit detections to system syslog")
 )
 
 func main() {
@@ -76,29 +76,29 @@ func main() {
 
 func run(ctx context.Context, log *zap.Logger) error {
 	collCfg := collector.DefaultConfig()
-	mapCfg  := mapper.DefaultConfig()
+	mapCfg := mapper.DefaultConfig()
 
 	fieldCfg := field.DefaultConfig()
-	fieldCfg.DecayRate        = *flagDecayRate
-	fieldCfg.WindowSize       = *flagWindowSize
+	fieldCfg.DecayRate = *flagDecayRate
+	fieldCfg.WindowSize = *flagWindowSize
 	fieldCfg.SnapshotInterval = *flagSnapshotInterval
 
 	detCfg := detector.DefaultConfig()
-	detCfg.AlertScore         = *flagAlertScore
-	detCfg.WarningScore       = *flagWarningScore
+	detCfg.AlertScore = *flagAlertScore
+	detCfg.WarningScore = *flagWarningScore
 	detCfg.AlertCooldownTicks = *flagCooldownTicks
 
 	// Build responder config from flags.
 	respCfg := responder.DefaultConfig()
-	respCfg.DryRun          = *flagDryRun
-	respCfg.KillOnAlert      = *flagKillOnAlert
-	respCfg.PauseOnWarning   = *flagPauseOnWarn
-	respCfg.QuarantineDir    = *flagQuarantine
-	respCfg.KillProcessTree  = *flagKillTree
-	respCfg.IsolateNetwork   = *flagIsolateNetwork
-	respCfg.EvidenceDir      = *flagEvidenceDir
-	respCfg.WebhookURL       = *flagWebhookURL
-	respCfg.UseSyslog        = *flagUseSyslog
+	respCfg.DryRun = *flagDryRun
+	respCfg.KillOnAlert = *flagKillOnAlert
+	respCfg.PauseOnWarning = *flagPauseOnWarn
+	respCfg.QuarantineDir = *flagQuarantine
+	respCfg.KillProcessTree = *flagKillTree
+	respCfg.IsolateNetwork = *flagIsolateNetwork
+	respCfg.EvidenceDir = *flagEvidenceDir
+	respCfg.WebhookURL = *flagWebhookURL
+	respCfg.UseSyslog = *flagUseSyslog
 
 	if *flagAllowlist != "" {
 		extra := strings.Split(*flagAllowlist, ",")
@@ -106,11 +106,11 @@ func run(ctx context.Context, log *zap.Logger) error {
 	}
 
 	// Channels.
-	rawCh    := make(chan event.RawEvent,    4096)
+	rawCh := make(chan event.RawEvent, 4096)
 	mappedCh := make(chan event.MappedEvent, 4096)
-	vecCh    := make(chan features.Vector,   256)
-	detCh    := make(chan detector.Detection, 64)
-	respCh   := make(chan detector.Detection, 64)
+	vecCh := make(chan features.Vector, 256)
+	detCh := make(chan detector.Detection, 64)
+	respCh := make(chan detector.Detection, 64)
 
 	// Stage construction.
 	coll, err := collector.New(collCfg, log.Named("collector"))
@@ -119,11 +119,11 @@ func run(ctx context.Context, log *zap.Logger) error {
 	}
 	defer coll.Close()
 
-	mpr  := mapper.New(mapCfg, log.Named("mapper"))
-	f    := field.NewField(fieldCfg)
-	te   := field.NewTemporalEngine(f, fieldCfg, log.Named("temporal"))
-	ext  := features.New()
-	det  := detector.New(detCfg, log.Named("detector"), detector.NewThresholdClassifier(detCfg))
+	mpr := mapper.New(mapCfg, log.Named("mapper"))
+	f := field.NewField(fieldCfg)
+	te := field.NewTemporalEngine(f, fieldCfg, log.Named("temporal"))
+	ext := features.New()
+	det := detector.New(detCfg, log.Named("detector"), detector.NewThresholdClassifier(detCfg))
 	resp := responder.New(respCfg, log.Named("responder"))
 
 	go resp.Run(ctx, respCh)
@@ -191,33 +191,35 @@ func run(ctx context.Context, log *zap.Logger) error {
 func printDetection(d detector.Detection, asJSON bool) {
 	if asJSON {
 		type jsonDet struct {
-			At       string  `json:"at"`
-			Severity string  `json:"severity"`
-			Score    float64 `json:"score"`
-			CFER     float64 `json:"cfer"`
-			Turb     float64 `json:"turbulence"`
-			Shock    float64 `json:"shockwave"`
-			Entropy  float64 `json:"entropy"`
-			Nodes    int     `json:"active_nodes"`
-			PID      uint32  `json:"offender_pid"`
-			Reason   string  `json:"reason"`
+			At        string  `json:"at"`
+			Severity  string  `json:"severity"`
+			Score     float64 `json:"score"`
+			CFER      float64 `json:"cfer"`
+			Turb      float64 `json:"turbulence"`
+			Shock     float64 `json:"shockwave"`
+			Entropy   float64 `json:"entropy"`
+			Nodes     int     `json:"active_nodes"`
+			PID       uint32  `json:"offender_pid"`
+			ParentPID uint32  `json:"parent_pid"`
+			Reason    string  `json:"reason"`
 		}
 		enc := json.NewEncoder(os.Stdout)
 		_ = enc.Encode(jsonDet{
-			At:       d.At.Format(time.RFC3339Nano),
-			Severity: d.Severity.String(),
-			Score:    d.Score,
-			CFER:     d.Vector.CFER,
-			Turb:     d.Vector.Turbulence,
-			Shock:    d.Vector.Shockwave,
-			Entropy:  d.Vector.Entropy,
-			Nodes:    d.Vector.ActiveNodes,
-			PID:      d.Vector.OffenderPID,
-			Reason:   d.Reason,
+			At:        d.At.Format(time.RFC3339Nano),
+			Severity:  d.Severity.String(),
+			Score:     d.Score,
+			CFER:      d.Vector.CFER,
+			Turb:      d.Vector.Turbulence,
+			Shock:     d.Vector.Shockwave,
+			Entropy:   d.Vector.Entropy,
+			Nodes:     d.Vector.ActiveNodes,
+			PID:       d.Vector.OffenderPID,
+			ParentPID: d.Vector.ParentPID,
+			Reason:    d.Reason,
 		})
 		return
 	}
-	fmt.Printf("[%s] %s  score=%.3f  cfer=%.3f  turb=%.3f  shock=%.3f  entropy=%.3f  nodes=%d  pid=%d\n",
+	fmt.Printf("[%s] %s  score=%.3f  cfer=%.3f  turb=%.3f  shock=%.3f  entropy=%.3f  nodes=%d  pid=%d  ppid=%d\n",
 		d.At.Format("15:04:05.000"),
 		d.Severity,
 		d.Score,
@@ -227,6 +229,7 @@ func printDetection(d detector.Detection, asJSON bool) {
 		d.Vector.Entropy,
 		d.Vector.ActiveNodes,
 		d.Vector.OffenderPID,
+		d.Vector.ParentPID,
 	)
 }
 

@@ -84,14 +84,14 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		QuarantineDir:  "/var/lib/ccf-agent/quarantine",
-		EvidenceDir:    "/var/lib/ccf-agent/evidence",
-		KillOnAlert:    true,
+		QuarantineDir:   "/var/lib/ccf-agent/quarantine",
+		EvidenceDir:     "/var/lib/ccf-agent/evidence",
+		KillOnAlert:     true,
 		KillProcessTree: true,
-		PauseOnWarning: true,
-		IsolateNetwork: false, // opt-in — has side effects
-		ResumeWindow:   10 * time.Second,
-		CooldownWindow: 30 * time.Second,
+		PauseOnWarning:  true,
+		IsolateNetwork:  false, // opt-in — has side effects
+		ResumeWindow:    10 * time.Second,
+		CooldownWindow:  30 * time.Second,
 		AllowlistComms: []string{
 			"systemd", "systemd-journal", "systemd-udevd",
 			"sshd", "journald", "NetworkManager",
@@ -183,6 +183,7 @@ func (r *Responder) Run(ctx context.Context, in <-chan detector.Detection) {
 
 func (r *Responder) handle(det detector.Detection) {
 	pid := det.Vector.OffenderPID
+	parentPID := det.Vector.ParentPID
 
 	// Always send alerts regardless of PID.
 	go r.sendAlerts(det)
@@ -205,35 +206,46 @@ func (r *Responder) handle(det detector.Detection) {
 		return
 	}
 
+	// When a child process (e.g. subshell) is detected doing suspicious
+	// activity, also kill the parent orchestrator to prevent respawning.
+	targetPID := pid
+	if parentPID != 0 && !r.isAllowlisted(parentPID) {
+		targetPID = parentPID
+		r.log.Info("targeting parent orchestrator",
+			zap.Uint32("child_pid", pid),
+			zap.Uint32("parent_pid", parentPID),
+		)
+	}
+
 	// Cooldown — don't hammer the same PID.
 	r.mu.Lock()
-	if last, ok := r.actioned[pid]; ok && time.Since(last) < r.cfg.CooldownWindow {
+	if last, ok := r.actioned[targetPID]; ok && time.Since(last) < r.cfg.CooldownWindow {
 		r.mu.Unlock()
 		return
 	}
-	r.actioned[pid] = time.Now()
+	r.actioned[targetPID] = time.Now()
 	r.mu.Unlock()
 
 	switch det.Severity {
 	case detector.SeverityWarning:
 		if r.cfg.PauseOnWarning {
-			r.pausePID(pid, det)
+			r.pausePID(targetPID, det)
 		}
 
 	case detector.SeverityAlert:
 		// Sequence: snapshot → pause → quarantine → network isolate → kill tree.
 		// Snapshot first so we capture the process before it disappears.
-		r.captureEvidence(pid, det)
-		r.pausePID(pid, det)
+		r.captureEvidence(targetPID, det)
+		r.pausePID(targetPID, det)
 		r.quarantineRecentFiles(det)
 		if r.cfg.IsolateNetwork {
-			r.isolateNetworkForPID(pid)
+			r.isolateNetworkForPID(targetPID)
 		}
 		if r.cfg.KillOnAlert {
 			if r.cfg.KillProcessTree {
-				r.killProcessTree(pid, det)
+				r.killProcessTree(targetPID, det)
 			} else {
-				r.killPID(pid, det)
+				r.killPID(targetPID, det)
 			}
 		}
 	}
