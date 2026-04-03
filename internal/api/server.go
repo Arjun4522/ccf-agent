@@ -180,6 +180,12 @@ type Server struct {
 	detCfg  detector.Config
 	respCfg responder.Config
 
+	// CPU tracking
+	cpuMu          sync.Mutex
+	cpuLastJiffies uint64
+	cpuLastAt      time.Time
+	cpuPercent     float64
+
 	mux *http.ServeMux
 }
 
@@ -192,17 +198,20 @@ func New(
 	detCfg detector.Config,
 	respCfg responder.Config,
 ) *Server {
+	j, _ := readProcJiffies()
 	s := &Server{
-		log:      log,
-		ring:     &ringBuffer{},
-		bc:       newBroadcaster(),
-		counters: &counters{startTime: time.Now(), rateBucketAt: time.Now()},
-		det:      det,
-		resp:     resp,
-		te:       te,
-		detCfg:   detCfg,
-		respCfg:  respCfg,
-		mux:      http.NewServeMux(),
+		log:            log,
+		ring:           &ringBuffer{},
+		bc:             newBroadcaster(),
+		counters:       &counters{startTime: time.Now(), rateBucketAt: time.Now()},
+		det:            det,
+		resp:           resp,
+		te:             te,
+		detCfg:         detCfg,
+		respCfg:        respCfg,
+		cpuLastJiffies: j,
+		cpuLastAt:      time.Now(),
+		mux:            http.NewServeMux(),
 	}
 	s.routes()
 	return s
@@ -429,7 +438,7 @@ func (s *Server) buildStatus() (*apiStatus, error) {
 		MonitoredProcesses: len(pidSet),
 		FieldNodes:         fieldNodes,
 		EventsPerSecond:    eventsPerSec,
-		CPUUsage:           0, // no cgo, skip — frontend can show 0
+		CPUUsage:           s.sampleCPU(),
 		MemoryMb:           float64(ms.Alloc) / 1_048_576,
 		LastUpdated:        time.Now().UTC().Format(time.RFC3339),
 	}, nil
@@ -847,7 +856,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	client := &wsClient{send: make(chan []byte, 256)}
 	s.bc.register(client)
 	defer func() {
+		// Deregister first so the broadcaster stops sending before the channel
+		// is closed; otherwise a concurrent broadcast can send to a closed
+		// channel and panic.
 		s.bc.deregister(client)
+		close(client.send)
 		conn.Close()
 	}()
 
@@ -885,8 +898,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			break
 		}
+		// Reset deadline on every received frame (including JSON pings from
+		// the frontend) so the connection survives across proxy keep-alive gaps.
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	}
-	close(client.send)
 }
 
 // ---------------------------------------------------------------------------
@@ -984,6 +999,58 @@ func commForPID(pid uint32) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// ---------------------------------------------------------------------------
+// CPU helpers
+// ---------------------------------------------------------------------------
+
+// readProcJiffies returns the sum of utime+stime from /proc/self/stat.
+func readProcJiffies() (uint64, error) {
+	data, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		return 0, err
+	}
+	// Format: pid (comm) state ppid ... utime(14) stime(15) ...
+	// Skip past the closing ')' of the comm field to handle spaces/parens in names.
+	s := string(data)
+	i := strings.LastIndex(s, ")")
+	if i < 0 {
+		return 0, fmt.Errorf("unexpected /proc/self/stat format")
+	}
+	fields := strings.Fields(s[i+1:])
+	// After ')': state(0) ppid(1) pgrp(2) session(3) tty(4) tpgid(5) flags(6)
+	//   minflt(7) cminflt(8) majflt(9) cmajflt(10) utime(11) stime(12)
+	if len(fields) < 13 {
+		return 0, fmt.Errorf("too few fields in /proc/self/stat")
+	}
+	utime, e1 := strconv.ParseUint(fields[11], 10, 64)
+	stime, e2 := strconv.ParseUint(fields[12], 10, 64)
+	if e1 != nil || e2 != nil {
+		return 0, fmt.Errorf("cannot parse jiffies")
+	}
+	return utime + stime, nil
+}
+
+// sampleCPU computes the CPU utilisation (%) since the last call.
+func (s *Server) sampleCPU() float64 {
+	j, err := readProcJiffies()
+	if err != nil {
+		return 0
+	}
+	s.cpuMu.Lock()
+	defer s.cpuMu.Unlock()
+	now := time.Now()
+	elapsed := now.Sub(s.cpuLastAt).Seconds()
+	if elapsed < 0.1 {
+		return s.cpuPercent // avoid divide-by-near-zero on rapid successive calls
+	}
+	const hz = 100 // USER_HZ — 100 on virtually all Linux systems
+	delta := float64(j-s.cpuLastJiffies) / hz
+	s.cpuPercent = (delta / elapsed) * 100
+	s.cpuLastJiffies = j
+	s.cpuLastAt = now
+	return s.cpuPercent
 }
 
 // ---------------------------------------------------------------------------

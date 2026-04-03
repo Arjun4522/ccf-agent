@@ -3,7 +3,7 @@ import { wsClient } from '../services/websocket';
 import { useStore } from '../store';
 import type { WSMessage, Detection, SystemStatus, FieldSnapshot } from '../types';
 import { generateMockDetection, generateMockStatus, generateTimeSeriesPoint, generateMockFieldSnapshot } from '../utils/mockData';
-import { getStatus, getDetections, getQuarantine, getConfig } from '../services/api';
+import { getStatus, getDetections, getQuarantine, getConfig, getFieldSnapshot } from '../services/api';
 
 export function useWebSocket() {
   const setWsConnected = useStore(s => s.setWsConnected);
@@ -76,11 +76,12 @@ export function useWebSocket() {
     let cancelled = false;
 
     async function loadInitialData() {
-      const [statusRes, detectionsRes, quarantineRes, configRes] = await Promise.allSettled([
+      const [statusRes, detectionsRes, quarantineRes, configRes, fieldRes] = await Promise.allSettled([
         getStatus(),
         getDetections(200),
         getQuarantine(),
         getConfig(),
+        getFieldSnapshot(),
       ]);
 
       if (cancelled) return;
@@ -110,6 +111,9 @@ export function useWebSocket() {
       }
       if (configRes.status === 'fulfilled' && configRes.value.ok) {
         setConfig(configRes.value.data);
+      }
+      if (fieldRes.status === 'fulfilled' && fieldRes.value.ok) {
+        setFieldSnapshot(fieldRes.value.data);
       }
     }
 
