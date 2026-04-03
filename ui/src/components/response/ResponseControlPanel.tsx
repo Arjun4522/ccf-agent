@@ -69,7 +69,7 @@ export const ResponseControlPanel: React.FC = () => {
 
       {/* Response Toggles */}
       <Card title="Automated Response Actions" subtitle="Configure graduated threat response">
-        <div className="flex flex-col gap-4">
+    <div className="h-full flex flex-col gap-4">
           <div className="flex items-center gap-3 p-3 bg-surface-700 rounded-lg border border-border">
             <Shield size={18} className="text-neon-yellow shrink-0" />
             <div className="flex-1">
@@ -246,7 +246,7 @@ export const ResponseControlPanel: React.FC = () => {
       </Card>
 
       {/* Score Weight Reference */}
-      <Card title="Detector Weight Configuration" subtitle="Feature contribution to composite score">
+      <Card title="Detector Weight Configuration" subtitle="Feature contribution to composite score" className="flex-1 min-h-0">
         <div className="grid grid-cols-2 gap-3">
           {[
             { label: 'CFER Weight',        value: '0.45', color: '#00d4ff', desc: 'Primary signal — regression slope' },

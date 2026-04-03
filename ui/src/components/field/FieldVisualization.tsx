@@ -251,7 +251,7 @@ export const FieldVisualization: React.FC = () => {
   }, [fieldSnapshot]);
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="h-full flex flex-col gap-4">
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card compact>
@@ -280,6 +280,7 @@ export const FieldVisualization: React.FC = () => {
       <Card
         title="Cognitive Capability Field"
         subtitle="Live node intensity propagation — hover nodes for details"
+        className="flex-1 min-h-0"
         actions={
           <div className="flex items-center gap-2">
             {Object.entries(TYPE_COLORS).map(([type, color]) => (
@@ -294,7 +295,7 @@ export const FieldVisualization: React.FC = () => {
           </div>
         }
       >
-        <div className="relative rounded-lg overflow-hidden border border-border" style={{ height: 420 }}>
+        <div className="relative rounded-lg overflow-hidden border border-border flex-1 min-h-[200px]">
           <canvas
             ref={canvasRef}
             width={dims.width}
@@ -314,8 +315,8 @@ export const FieldVisualization: React.FC = () => {
       </Card>
 
       {/* Node List */}
-      <Card title="Active Field Nodes" subtitle="Sorted by intensity (descending)">
-        <div className="overflow-auto rounded-lg border border-border" style={{ maxHeight: 300 }}>
+      <Card title="Active Field Nodes" subtitle="Sorted by intensity (descending)" className="shrink-0">
+        <div className="overflow-auto rounded-lg border border-border" style={{ maxHeight: 200 }}>
           <table className="w-full">
             <thead className="sticky top-0 bg-surface-800">
               <tr>

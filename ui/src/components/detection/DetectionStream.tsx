@@ -1,6 +1,6 @@
-import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react';
+import React, { useMemo, useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Pause, Play, Filter, Search, Download, Trash2, ChevronDown, ChevronRight } from 'lucide-react';
+import { Pause, Play, Filter, Search, Download, Trash2, ChevronDown, ChevronRight, ChevronLeft } from 'lucide-react';
 import { Card } from '../ui/Card';
 import { SeverityBadge, ActionBadge } from '../ui/Badge';
 import { Button } from '../ui/Button';
@@ -10,7 +10,7 @@ import { useExport } from '../../hooks/useExport';
 import { formatTimestamp } from '../../utils/mockData';
 import type { Detection } from '../../types';
 
-const ROW_HEIGHT = 40;
+const PAGE_SIZE = 25;
 
 const DetectionRow: React.FC<{ detection: Detection; isNew?: boolean }> = React.memo(
   ({ detection: d, isNew }) => {
@@ -29,7 +29,6 @@ const DetectionRow: React.FC<{ detection: Detection; isNew?: boolean }> = React.
           transition={{ duration: 0.8 }}
           className={`text-xs cursor-pointer ${rowBg} transition-colors`}
           onClick={() => setExpanded(e => !e)}
-          style={{ height: ROW_HEIGHT }}
         >
           <td className="px-3 py-2 text-slate-500 font-mono whitespace-nowrap">
             {formatTimestamp(d.timestamp)}
@@ -98,9 +97,12 @@ export const DetectionStream: React.FC = () => {
   const clearDetections = useStore(s => s.clearDetections);
   const { exportJSON, exportCSV } = useExport();
 
-  const tbodyRef = useRef<HTMLDivElement>(null);
-  const [autoScroll, setAutoScroll] = useState(true);
-  const prevCountRef = useRef(detections.length);
+  const [page, setPage] = useState(1);
+
+  // Reset to page 1 whenever filters change
+  useEffect(() => {
+    setPage(1);
+  }, [severityFilter, pidSearch]);
 
   const filtered = useMemo(() => {
     let list = detections;
@@ -114,22 +116,12 @@ export const DetectionStream: React.FC = () => {
         (d.processName ?? '').toLowerCase().includes(q)
       );
     }
-    return list.slice(0, 500);
+    return list;
   }, [detections, severityFilter, pidSearch]);
 
-  // Auto-scroll to top when new detections arrive
-  useEffect(() => {
-    if (!autoScroll || streamPaused) return;
-    if (detections.length !== prevCountRef.current) {
-      prevCountRef.current = detections.length;
-      tbodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-  }, [detections.length, autoScroll, streamPaused]);
-
-  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    const el = e.currentTarget;
-    setAutoScroll(el.scrollTop < 80);
-  }, []);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const filterButtons: { label: string; value: typeof severityFilter }[] = [
     { label: 'ALL', value: 'ALL' },
@@ -142,6 +134,7 @@ export const DetectionStream: React.FC = () => {
       title="Real-Time Detection Stream"
       subtitle={`${filtered.length} events ${streamPaused ? '(PAUSED)' : '(LIVE)'}`}
       glow={detections.some(d => d.severity === 'ALERT') ? 'red' : 'none'}
+      className="h-full"
       actions={
         <div className="flex items-center gap-2">
           <Button
@@ -198,12 +191,7 @@ export const DetectionStream: React.FC = () => {
       </div>
 
       {/* Table */}
-      <div
-        ref={tbodyRef}
-        className="overflow-auto rounded-lg border border-border"
-        style={{ maxHeight: 480 }}
-        onScroll={handleScroll}
-      >
+      <div className="flex-1 min-h-0 overflow-x-auto rounded-lg border border-border">
         <table className="w-full border-collapse" style={{ minWidth: 860 }}>
           <thead className="sticky top-0 z-10">
             <tr className="bg-surface-800 border-b border-border">
@@ -221,25 +209,50 @@ export const DetectionStream: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 ? (
+            {pageItems.length === 0 ? (
               <tr>
                 <td colSpan={11} className="text-center py-12 text-slate-600 text-sm">
                   No detections match current filters
                 </td>
               </tr>
             ) : (
-              filtered.map((d, i) => (
-                <DetectionRow key={d.id} detection={d} isNew={i === 0 && !streamPaused} />
+              pageItems.map((d, i) => (
+                <DetectionRow key={d.id} detection={d} isNew={i === 0 && safePage === 1 && !streamPaused} />
               ))
             )}
           </tbody>
         </table>
       </div>
 
-      {/* Footer */}
+      {/* Footer — pagination */}
       <div className="flex items-center justify-between text-[10px] text-slate-600 font-mono">
-        <span>Showing {filtered.length} of {detections.length} detections (max 500)</span>
-        <span>SPACE = pause/resume · Ctrl+L = clear · Click row for details</span>
+        <span>
+          {filtered.length === 0
+            ? 'No detections'
+            : `${(safePage - 1) * PAGE_SIZE + 1}–${Math.min(safePage * PAGE_SIZE, filtered.length)} of ${filtered.length} detections`}
+        </span>
+
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setPage(p => Math.max(1, p - 1))}
+            disabled={safePage === 1}
+            className="p-0.5 rounded text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronLeft size={12} />
+          </button>
+          <span className="px-2 text-slate-400">
+            {safePage} / {totalPages}
+          </span>
+          <button
+            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+            disabled={safePage === totalPages}
+            className="p-0.5 rounded text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronRight size={12} />
+          </button>
+        </div>
+
+        <span>Click row for details</span>
       </div>
     </Card>
   );

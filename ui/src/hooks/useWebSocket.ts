@@ -8,6 +8,7 @@ import { getStatus, getDetections, getQuarantine, getConfig, getFieldSnapshot } 
 export function useWebSocket() {
   const setWsConnected = useStore(s => s.setWsConnected);
   const addDetection = useStore(s => s.addDetection);
+  const setDetections = useStore(s => s.setDetections);
   const setStatus = useStore(s => s.setStatus);
   const setFieldSnapshot = useStore(s => s.setFieldSnapshot);
   const addTimeSeriesPoint = useStore(s => s.addTimeSeriesPoint);
@@ -119,6 +120,44 @@ export function useWebSocket() {
 
     loadInitialData();
 
+    // ── 10-second REST polling (supplements WebSocket) ────────────────────────
+    async function pollData() {
+      if (cancelled) return;
+      const [statusRes, quarantineRes, configRes, fieldRes] = await Promise.allSettled([
+        getStatus(),
+        getQuarantine(),
+        getConfig(),
+        getFieldSnapshot(),
+      ]);
+      if (cancelled) return;
+      if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
+        setStatus(statusRes.value.data);
+      }
+      if (quarantineRes.status === 'fulfilled' && quarantineRes.value.ok) {
+        setQuarantine(quarantineRes.value.data ?? []);
+      }
+      if (configRes.status === 'fulfilled' && configRes.value.ok) {
+        setConfig(configRes.value.data);
+      }
+      if (fieldRes.status === 'fulfilled' && fieldRes.value.ok) {
+        setFieldSnapshot(fieldRes.value.data);
+      }
+    }
+
+    const pollInterval = setInterval(pollData, 5_000);
+
+    // ── 1-second detection polling ────────────────────────────────────────────
+    async function pollDetections() {
+      if (cancelled) return;
+      const res = await getDetections(200);
+      if (cancelled) return;
+      if (res.ok && res.data) {
+        setDetections(res.data);
+      }
+    }
+
+    const detectionsInterval = setInterval(pollDetections, 1_000);
+
     // ── Real WS mode ─────────────────────────────────────────────────────────
     wsClient.connect();
 
@@ -158,6 +197,8 @@ export function useWebSocket() {
 
     return () => {
       cancelled = true;
+      clearInterval(pollInterval);
+      clearInterval(detectionsInterval);
       unsubStatus();
       unsubMsg();
       wsClient.disconnect();

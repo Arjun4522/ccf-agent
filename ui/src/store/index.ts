@@ -28,6 +28,7 @@ interface AppState {
   // ── Detections ───────────────────────────────────────────────────────────────
   detections: Detection[];
   addDetection: (d: Detection) => void;
+  setDetections: (ds: Detection[]) => void;
   clearDetections: () => void;
 
   // ── Stream control ───────────────────────────────────────────────────────────
@@ -89,6 +90,7 @@ export const useStore = create<AppState>((set) => ({
     set((state) => ({
       detections: [d, ...state.detections].slice(0, MAX_DETECTIONS),
     })),
+  setDetections: (ds) => set({ detections: ds.slice(0, MAX_DETECTIONS) }),
   clearDetections: () => set({ detections: [] }),
 
   // Stream control

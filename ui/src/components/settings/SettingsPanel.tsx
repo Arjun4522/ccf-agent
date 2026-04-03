@@ -49,7 +49,7 @@ export const SettingsPanel: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="h-full flex flex-col gap-4">
       {/* Field Parameters */}
       <Card
         title="Field Parameters"
@@ -211,7 +211,7 @@ export const SettingsPanel: React.FC = () => {
       </Card>
 
       {/* About */}
-      <Card title="About CCF Agent">
+      <Card title="About CCF Agent" className="flex-1 min-h-0">
         <div className="grid grid-cols-2 gap-3 text-xs font-mono">
           {[
             ['Agent Version', 'v2.1.0'],

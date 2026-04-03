@@ -161,7 +161,7 @@ export const QuarantineManager: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="h-full flex flex-col gap-4">
       {/* Stats bar */}
       <div className="glass rounded-xl border border-neon-red/20 p-4 flex items-center gap-6 flex-wrap glow-red">
         <div className="flex items-center gap-2">
@@ -184,6 +184,7 @@ export const QuarantineManager: React.FC = () => {
       <Card
         title="Quarantined Files"
         subtitle="Isolated malicious files pending admin review"
+        className="flex-1 min-h-0"
         actions={
           <span className="text-[10px] text-slate-500 font-mono">
             {quarantine.length} file{quarantine.length !== 1 ? 's' : ''}
@@ -197,7 +198,7 @@ export const QuarantineManager: React.FC = () => {
             <p className="text-xs text-slate-700">Files will appear here when the agent quarantines suspicious content</p>
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
+          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
             {quarantine.map(file => (
               <FileRow
                 key={file.id}
@@ -212,7 +213,7 @@ export const QuarantineManager: React.FC = () => {
       </Card>
 
       {/* Warning */}
-      <div className="glass rounded-lg border border-neon-yellow/20 p-3 text-xs text-slate-400 leading-relaxed">
+      <div className="shrink-0 glass rounded-lg border border-neon-yellow/20 p-3 text-xs text-slate-400 leading-relaxed">
         <span className="text-neon-yellow font-semibold">Warning: </span>
         Quarantined files may contain active ransomware payloads. Only restore files after forensic analysis confirms
         they are safe. Permanent deletion is irreversible. All actions are logged for audit.
