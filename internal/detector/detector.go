@@ -8,6 +8,7 @@ package detector
 import (
 	"context"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/ccf-agent/internal/features"
@@ -36,11 +37,12 @@ func (s Severity) String() string {
 
 // Detection is raised when the detector triggers.
 type Detection struct {
-	At       time.Time
-	Severity Severity
-	Score    float64         // composite [0, 1]
-	Vector   features.Vector // the feature vector that triggered this
-	Reason   string          // human-readable trigger explanation
+	At          time.Time
+	Severity    Severity
+	Score       float64         // composite [0, 1]
+	Vector      features.Vector // the feature vector that triggered this
+	Reason      string          // human-readable trigger explanation
+	ProcessName string          // resolved at ingest time while the process is alive
 }
 
 // Classifier is the interface for pluggable ML models.
@@ -103,6 +105,7 @@ func DefaultConfig() Config {
 
 // Detector evaluates feature vectors and emits Detection events.
 type Detector struct {
+	cfgMu         sync.RWMutex
 	cfg           Config
 	log           *zap.Logger
 	classifier    Classifier
@@ -149,31 +152,40 @@ func (d *Detector) SetClassifier(c Classifier) {
 	d.classifier = c
 }
 
+// SetConfig replaces the detector configuration at runtime (goroutine-safe).
+func (d *Detector) SetConfig(cfg Config) {
+	d.cfgMu.Lock()
+	d.cfg = cfg
+	d.cfgMu.Unlock()
+}
+
 // ---------------------------------------------------------------------------
 // Evaluation logic
 // ---------------------------------------------------------------------------
 
 func (d *Detector) evaluate(v features.Vector) (Detection, bool) {
+	d.cfgMu.RLock()
+	cfg := d.cfg
+	d.cfgMu.RUnlock()
+
 	var score float64
 	var err error
 
-	if d.cfg.UseMLClassifier && d.classifier != nil {
+	if cfg.UseMLClassifier && d.classifier != nil {
 		score, err = d.classifier.Score(v)
 		if err != nil {
 			d.log.Error("classifier error, falling back to threshold", zap.Error(err))
-			score = d.thresholdScore(v)
+			score = d.thresholdScoreWith(v, cfg)
 		}
 	} else {
-		score = d.thresholdScore(v)
+		score = d.thresholdScoreWith(v, cfg)
 	}
 
-	sev := d.severityMultiScale(score)
+	sev := d.severityMultiScaleWith(score, cfg)
 
 	// Hysteresis: once ALERT fires, hold minimum WARNING for cooldown ticks.
-	// This prevents negative-shockwave ticks from silencing the detector
-	// while the field is still highly elevated post-burst.
 	if sev == SeverityAlert {
-		d.alertCooldown = d.cfg.AlertCooldownTicks
+		d.alertCooldown = cfg.AlertCooldownTicks
 	} else if d.alertCooldown > 0 {
 		d.alertCooldown--
 		if sev == SeverityNone {
@@ -202,6 +214,13 @@ func (d *Detector) evaluate(v features.Vector) (Detection, bool) {
 //   - Negative shockwave (field decelerating) is clamped to 0 — that's
 //     a benign signal (burst subsiding), not a ransomware indicator.
 func (d *Detector) thresholdScore(v features.Vector) float64 {
+	d.cfgMu.RLock()
+	cfg := d.cfg
+	d.cfgMu.RUnlock()
+	return d.thresholdScoreWith(v, cfg)
+}
+
+func (d *Detector) thresholdScoreWith(v features.Vector, cfg Config) float64 {
 	cfer := v.CFER
 	if cfer < 0 {
 		cfer = 0
@@ -213,24 +232,27 @@ func (d *Detector) thresholdScore(v features.Vector) float64 {
 	}
 	// sqrt-compress shockwave to reduce oscillation sensitivity.
 	shockSqrt := math.Sqrt(shock)
-	shockThreshSqrt := math.Sqrt(max(d.cfg.ShockwaveThreshold, 1e-9))
+	shockThreshSqrt := math.Sqrt(max(cfg.ShockwaveThreshold, 1e-9))
 
-	cferN := clamp01(cfer / max(d.cfg.CFERThreshold, 1e-9))
-	turbN := clamp01(v.Turbulence / max(d.cfg.TurbulenceThreshold, 1e-9))
+	cferN := clamp01(cfer / max(cfg.CFERThreshold, 1e-9))
+	turbN := clamp01(v.Turbulence / max(cfg.TurbulenceThreshold, 1e-9))
 	shockN := clamp01(shockSqrt / shockThreshSqrt)
-	entrN := clamp01(v.Entropy / max(d.cfg.EntropyThreshold, 1e-9))
+	entrN := clamp01(v.Entropy / max(cfg.EntropyThreshold, 1e-9))
 
-	return d.cfg.CFERWeight*cferN +
-		d.cfg.TurbulenceWeight*turbN +
-		d.cfg.ShockwaveWeight*shockN +
-		d.cfg.EntropyWeight*entrN
+	return cfg.CFERWeight*cferN +
+		cfg.TurbulenceWeight*turbN +
+		cfg.ShockwaveWeight*shockN +
+		cfg.EntropyWeight*entrN
 }
 
 func (d *Detector) severity(score float64) Severity {
+	d.cfgMu.RLock()
+	cfg := d.cfg
+	d.cfgMu.RUnlock()
 	switch {
-	case score >= d.cfg.AlertScore:
+	case score >= cfg.AlertScore:
 		return SeverityAlert
-	case score >= d.cfg.WarningScore:
+	case score >= cfg.WarningScore:
 		return SeverityWarning
 	default:
 		return SeverityNone
@@ -238,11 +260,18 @@ func (d *Detector) severity(score float64) Severity {
 }
 
 func (d *Detector) severityMultiScale(score float64) Severity {
-	if score >= d.cfg.AlertScore {
+	d.cfgMu.RLock()
+	cfg := d.cfg
+	d.cfgMu.RUnlock()
+	return d.severityMultiScaleWith(score, cfg)
+}
+
+func (d *Detector) severityMultiScaleWith(score float64, cfg Config) Severity {
+	if score >= cfg.AlertScore {
 		return SeverityAlert
 	}
-	if score >= d.cfg.FastThreshold {
-		confirmThreshold := d.cfg.FastThreshold * d.cfg.ConfirmMultiplier
+	if score >= cfg.FastThreshold {
+		confirmThreshold := cfg.FastThreshold * cfg.ConfirmMultiplier
 		if score >= confirmThreshold {
 			return SeverityAlert
 		}

@@ -2,7 +2,7 @@ import type {
   Detection, SystemStatus, QuarantinedFile, AgentConfig,
   TimeSeriesPoint, FieldSnapshot, Notification, NavPage, UserRole
 } from '../types';
-import { generateMockDetection, generateMockStatus, generateMockQuarantine, generateMockConfig, generateMockFieldSnapshot } from '../utils/mockData';
+import { generateMockStatus, generateMockConfig } from '../utils/mockData';
 import { create } from 'zustand';
 
 const MAX_DETECTIONS = 1000;
@@ -84,7 +84,7 @@ export const useStore = create<AppState>((set) => ({
   setStatus: (s) => set({ status: s }),
 
   // Detections
-  detections: Array.from({ length: 20 }, () => generateMockDetection()),
+  detections: [],
   addDetection: (d) =>
     set((state) => ({
       detections: [d, ...state.detections].slice(0, MAX_DETECTIONS),
@@ -107,7 +107,7 @@ export const useStore = create<AppState>((set) => ({
     })),
 
   // Quarantine
-  quarantine: generateMockQuarantine(),
+  quarantine: [],
   setQuarantine: (files) => set({ quarantine: files }),
   removeQuarantineFile: (id) =>
     set((state) => ({
@@ -119,7 +119,7 @@ export const useStore = create<AppState>((set) => ({
   setConfig: (c) => set((state) => ({ config: { ...state.config, ...c } })),
 
   // Field
-  fieldSnapshot: generateMockFieldSnapshot(),
+  fieldSnapshot: null,
   setFieldSnapshot: (f) => set({ fieldSnapshot: f }),
 
   // Notifications
@@ -143,6 +143,6 @@ export const useStore = create<AppState>((set) => ({
   clearNotifications: () => set({ notifications: [] }),
 
   // Mock
-  mockMode: true,
+  mockMode: false,
   setMockMode: (v) => set({ mockMode: v }),
 }));

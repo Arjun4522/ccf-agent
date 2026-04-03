@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ccf-agent/internal/api"
 	"github.com/ccf-agent/internal/collector"
 	"github.com/ccf-agent/internal/detector"
 	"github.com/ccf-agent/internal/features"
@@ -61,6 +62,9 @@ var (
 	// Alerting
 	flagWebhookURL = flag.String("webhook-url", "", "HTTP endpoint for JSON alert POSTs (Slack/PagerDuty/etc.)")
 	flagUseSyslog  = flag.Bool("syslog", false, "emit detections to system syslog")
+
+	// API server
+	flagAPIAddr = flag.String("api-addr", ":8080", "HTTP listen address for the dashboard API and WebSocket")
 )
 
 func main() {
@@ -142,6 +146,14 @@ func run(ctx context.Context, log *zap.Logger) error {
 	det := detector.New(detCfg, log.Named("detector"), detector.NewThresholdClassifier(detCfg))
 	resp := responder.New(respCfg, log.Named("responder"))
 
+	// API server — must be constructed before starting the pipeline loop.
+	apiSrv := api.New(log.Named("api"), det, resp, te, detCfg, respCfg)
+	go func() {
+		if err := apiSrv.ListenAndServe(ctx, *flagAPIAddr); err != nil {
+			log.Error("api server error", zap.Error(err))
+		}
+	}()
+
 	go resp.Run(ctx, respCh)
 
 	// Feature extraction ticker.
@@ -181,6 +193,7 @@ func run(ctx context.Context, log *zap.Logger) error {
 	go det.Run(ctx, vecCh, detCh)
 
 	log.Info("ccf agent running",
+		zap.String("api_addr", *flagAPIAddr),
 		zap.Float64("alert_score", *flagAlertScore),
 		zap.Float64("warning_score", *flagWarningScore),
 		zap.Float64("decay_rate", *flagDecayRate),
@@ -190,12 +203,21 @@ func run(ctx context.Context, log *zap.Logger) error {
 		zap.Bool("dry_run", *flagDryRun),
 	)
 
+	// Broadcast field snapshot to WS clients every 2 seconds.
+	fieldTicker := time.NewTicker(2 * time.Second)
+	defer fieldTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-fieldTicker.C:
+			apiSrv.BroadcastField()
 		case d := <-detCh:
 			printDetection(d, *flagOutputJSON)
+			// Fan-out: API server ring buffer + WS broadcast.
+			apiSrv.Ingest(d)
+			// Forward to responder (non-blocking, drop if full).
 			select {
 			case respCh <- d:
 			default:

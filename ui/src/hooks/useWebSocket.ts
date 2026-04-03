@@ -3,6 +3,7 @@ import { wsClient } from '../services/websocket';
 import { useStore } from '../store';
 import type { WSMessage, Detection, SystemStatus, FieldSnapshot } from '../types';
 import { generateMockDetection, generateMockStatus, generateTimeSeriesPoint, generateMockFieldSnapshot } from '../utils/mockData';
+import { getStatus, getDetections, getQuarantine, getConfig } from '../services/api';
 
 export function useWebSocket() {
   const setWsConnected = useStore(s => s.setWsConnected);
@@ -11,6 +12,8 @@ export function useWebSocket() {
   const setFieldSnapshot = useStore(s => s.setFieldSnapshot);
   const addTimeSeriesPoint = useStore(s => s.addTimeSeriesPoint);
   const addNotification = useStore(s => s.addNotification);
+  const setQuarantine = useStore(s => s.setQuarantine);
+  const setConfig = useStore(s => s.setConfig);
   const streamPaused = useStore(s => s.streamPaused);
   const mockMode = useStore(s => s.mockMode);
   const streamPausedRef = useRef(streamPaused);
@@ -69,7 +72,50 @@ export function useWebSocket() {
       };
     }
 
-    // Real WS mode
+    // ── Real mode: load initial state from REST APIs ──────────────────────────
+    let cancelled = false;
+
+    async function loadInitialData() {
+      const [statusRes, detectionsRes, quarantineRes, configRes] = await Promise.allSettled([
+        getStatus(),
+        getDetections(200),
+        getQuarantine(),
+        getConfig(),
+      ]);
+
+      if (cancelled) return;
+
+      if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
+        setStatus(statusRes.value.data);
+      }
+      if (detectionsRes.status === 'fulfilled' && detectionsRes.value.ok) {
+        const dets = detectionsRes.value.data ?? [];
+        // Add oldest-first so newest ends up at top after addDetection prepends.
+        for (let i = dets.length - 1; i >= 0; i--) {
+          const det = dets[i];
+          addDetection(det);
+          addTimeSeriesPoint({
+            time: new Date(det.timestamp).toLocaleTimeString('en-GB'),
+            timestamp: new Date(det.timestamp).getTime(),
+            score: det.score,
+            cfer: det.vector.cfer,
+            turbulence: det.vector.turbulence,
+            shockwave: det.vector.shockwave,
+            entropy: det.vector.entropy,
+          });
+        }
+      }
+      if (quarantineRes.status === 'fulfilled' && quarantineRes.value.ok) {
+        setQuarantine(quarantineRes.value.data ?? []);
+      }
+      if (configRes.status === 'fulfilled' && configRes.value.ok) {
+        setConfig(configRes.value.data);
+      }
+    }
+
+    loadInitialData();
+
+    // ── Real WS mode ─────────────────────────────────────────────────────────
     wsClient.connect();
 
     const unsubStatus = wsClient.onStatus(setWsConnected);
@@ -107,9 +153,11 @@ export function useWebSocket() {
     });
 
     return () => {
+      cancelled = true;
       unsubStatus();
       unsubMsg();
       wsClient.disconnect();
     };
   }, [mockMode]); // eslint-disable-line react-hooks/exhaustive-deps
 }
+

@@ -1,11 +1,11 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Save, RotateCcw } from 'lucide-react';
 import { Card } from '../ui/Card';
 import { Toggle } from '../ui/Toggle';
 import { Slider } from '../ui/Slider';
 import { Button } from '../ui/Button';
 import { useStore } from '../../store';
-import { postConfig } from '../../services/api';
+import { postConfig, getConfig } from '../../services/api';
 
 export const SettingsPanel: React.FC = () => {
   const config = useStore(s => s.config);
@@ -16,6 +16,14 @@ export const SettingsPanel: React.FC = () => {
   const setMockMode = useStore(s => s.setMockMode);
   const addNotification = useStore(s => s.addNotification);
   const isAdmin = role === 'admin';
+
+  // Load config from backend on mount (real mode only).
+  useEffect(() => {
+    if (mockMode) return;
+    getConfig().then(res => {
+      if (res.ok) setConfig(res.data);
+    });
+  }, [mockMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
     if (!mockMode) {

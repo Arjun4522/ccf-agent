@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Archive, Trash2, RotateCcw, FileWarning, Clock, HardDrive } from 'lucide-react';
 import { Card } from '../ui/Card';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
 import { useStore } from '../../store';
-import { restoreFile, deleteFile } from '../../services/api';
+import { restoreFile, deleteFile, getQuarantine } from '../../services/api';
 import { formatBytes, formatTimestamp } from '../../utils/mockData';
 import type { QuarantinedFile } from '../../types';
 
@@ -115,6 +115,14 @@ export const QuarantineManager: React.FC = () => {
   const mockMode = useStore(s => s.mockMode);
   const addNotification = useStore(s => s.addNotification);
   const isAdmin = role === 'admin';
+
+  // Load quarantine list on mount (real mode only).
+  useEffect(() => {
+    if (mockMode) return;
+    getQuarantine().then(res => {
+      if (res.ok) setQuarantine(res.data ?? []);
+    });
+  }, [mockMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const totalSize = quarantine.reduce((sum, f) => sum + f.size, 0);
 

@@ -119,6 +119,16 @@ func DefaultConfig() Config {
 // Responder
 // ---------------------------------------------------------------------------
 
+// quarantineSidecar is the metadata written as <file>.ccf-meta.json alongside
+// every file moved to the quarantine directory. It allows the API server to
+// show the original path and provide a restore-file action.
+type quarantineSidecar struct {
+	OriginalPath  string `json:"originalPath"`
+	QuarantinedAt string `json:"quarantinedAt"`
+	OriginPID     int    `json:"originPID"`
+	ProcessName   string `json:"processName"`
+}
+
 // Responder reacts to detections with blocking actions.
 type Responder struct {
 	cfg            Config
@@ -779,6 +789,17 @@ func (r *Responder) quarantineRecentFiles(det detector.Detection) {
 		if err := os.Rename(f, dst); err != nil {
 			r.log.Error("quarantine rename failed", zap.String("file", f), zap.Error(err))
 			_ = exec.Command("chattr", "+i", f).Run()
+			continue
+		}
+		// Write sidecar metadata so the API can serve original path + PID.
+		meta := quarantineSidecar{
+			OriginalPath:  f,
+			QuarantinedAt: time.Now().UTC().Format(time.RFC3339),
+			OriginPID:     int(pid),
+			ProcessName:   r.commForPID(pid),
+		}
+		if b, err := json.Marshal(meta); err == nil {
+			_ = os.WriteFile(dst+".ccf-meta.json", b, 0600)
 		}
 	}
 }
@@ -858,4 +879,14 @@ func (r *Responder) PausedPIDs() []uint32 {
 		out = append(out, pid)
 	}
 	return out
+}
+
+// SetConfig replaces the responder configuration at runtime (goroutine-safe).
+// Only the fields the API exposes are updated; allowlists etc. remain unchanged.
+func (r *Responder) SetConfig(cfg Config) {
+	r.mu.Lock()
+	r.cfg.KillOnAlert = cfg.KillOnAlert
+	r.cfg.PauseOnWarning = cfg.PauseOnWarning
+	r.cfg.DryRun = cfg.DryRun
+	r.mu.Unlock()
 }
