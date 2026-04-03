@@ -1,0 +1,139 @@
+@import "tailwindcss";
+
+@theme {
+  --color-neon-green: #00ff88;
+  --color-neon-yellow: #ffd700;
+  --color-neon-red: #ff3366;
+  --color-neon-blue: #00d4ff;
+  --color-neon-purple: #b44fff;
+
+  --color-surface-900: #080b11;
+  --color-surface-800: #0d1117;
+  --color-surface-700: #131920;
+  --color-surface-600: #1a2333;
+  --color-surface-500: #1e2a3a;
+  --color-surface-400: #253347;
+  --color-surface-300: #2e3d52;
+
+  --color-border: #1e3a5a;
+  --color-border-bright: #2a5080;
+
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #080b11;
+  color: #e2e8f0;
+  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #0d1117; }
+::-webkit-scrollbar-thumb { background: #1e3a5a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #2a5080; }
+
+/* Glassmorphism */
+.glass {
+  background: rgba(13, 17, 23, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(30, 58, 90, 0.5);
+}
+
+/* Neon glow */
+.glow-green  { box-shadow: 0 0 8px rgba(0,255,136,0.35), 0 0 20px rgba(0,255,136,0.1); }
+.glow-yellow { box-shadow: 0 0 8px rgba(255,215,0,0.35), 0 0 20px rgba(255,215,0,0.1); }
+.glow-red    { box-shadow: 0 0 10px rgba(255,51,102,0.45), 0 0 28px rgba(255,51,102,0.15); }
+.glow-blue   { box-shadow: 0 0 8px rgba(0,212,255,0.35), 0 0 20px rgba(0,212,255,0.1); }
+
+.text-glow-green  { text-shadow: 0 0 8px rgba(0,255,136,0.7); }
+.text-glow-red    { text-shadow: 0 0 8px rgba(255,51,102,0.7); }
+.text-glow-yellow { text-shadow: 0 0 8px rgba(255,215,0,0.7); }
+.text-glow-blue   { text-shadow: 0 0 8px rgba(0,212,255,0.7); }
+
+/* Animations */
+@keyframes pulse-green {
+  0%,100% { opacity:1; box-shadow: 0 0 4px rgba(0,255,136,0.6); }
+  50%      { opacity:0.7; box-shadow: 0 0 14px rgba(0,255,136,0.95); }
+}
+@keyframes pulse-red {
+  0%,100% { opacity:1; box-shadow: 0 0 5px rgba(255,51,102,0.6); }
+  50%      { opacity:0.7; box-shadow: 0 0 18px rgba(255,51,102,1.0); }
+}
+@keyframes pulse-yellow {
+  0%,100% { opacity:1; }
+  50%      { opacity:0.55; }
+}
+@keyframes fadeSlideIn {
+  from { opacity:0; transform:translateY(-5px); }
+  to   { opacity:1; transform:translateY(0); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+
+.animate-pulse-green  { animation: pulse-green  2s ease-in-out infinite; }
+.animate-pulse-red    { animation: pulse-red    1.4s ease-in-out infinite; }
+.animate-pulse-yellow { animation: pulse-yellow 2s ease-in-out infinite; }
+.animate-fade-slide   { animation: fadeSlideIn  0.2s ease-out; }
+.animate-spin-slow    { animation: spin-slow 3s linear infinite; }
+
+/* Recharts overrides */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: rgba(30, 58, 90, 0.45) !important;
+}
+.recharts-text { fill: #64748b !important; }
+.recharts-legend-item-text { color: #94a3b8 !important; }
+.recharts-tooltip-wrapper .recharts-default-tooltip {
+  background: #0d1117 !important;
+  border: 1px solid #1e3a5a !important;
+  border-radius: 6px !important;
+}
+
+/* Range input styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: #1e3a5a;
+  border-radius: 2px;
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #00d4ff;
+  cursor: pointer;
+  box-shadow: 0 0 6px rgba(0,212,255,0.6);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #00d4ff;
+  cursor: pointer;
+  border: none;
+}

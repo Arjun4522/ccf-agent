@@ -1,3 +1,25 @@
 ccf-agent
 ransomware_test/
 ransomeware_test/
+
+# UI build artifacts
+ui/node_modules/
+ui/dist/
+ui/.env
+ui/.env.local
+ui/.env.*.local
+
+# Go build artifacts
+*.o
+*.a
+*.so
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
