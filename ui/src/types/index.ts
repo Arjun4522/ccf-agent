@@ -1,6 +1,6 @@
 // ─── Core Domain Types ────────────────────────────────────────────────────────
 
-export type Severity = 'NONE' | 'WARNING' | 'ALERT';
+export type Severity = 'NONE' | 'NORMAL' | 'WARNING' | 'ALERT';
 
 export type ActionTaken = 'SIGSTOP' | 'SIGKILL' | 'QUARANTINE' | 'NONE';
 

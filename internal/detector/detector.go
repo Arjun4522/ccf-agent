@@ -20,12 +20,15 @@ type Severity int
 
 const (
 	SeverityNone    Severity = iota
+	SeverityNormal           // score in [FastThreshold, WarningScore) — below action threshold
 	SeverityWarning          // elevated — monitor closely
 	SeverityAlert            // high confidence attack pattern
 )
 
 func (s Severity) String() string {
 	switch s {
+	case SeverityNormal:
+		return "NORMAL"
 	case SeverityWarning:
 		return "WARNING"
 	case SeverityAlert:
@@ -183,13 +186,16 @@ func (d *Detector) evaluate(v features.Vector) (Detection, bool) {
 
 	sev := d.severityMultiScaleWith(score, cfg)
 
-	// Hysteresis: once ALERT fires, hold minimum WARNING for cooldown ticks.
+	// Hysteresis: once ALERT fires, hold minimum NORMAL for cooldown ticks so
+	// sub-threshold noise is still visible but score thresholds remain authoritative.
+	// NORMAL-range scores ([FastThreshold, WarningScore)) are never promoted beyond
+	// NORMAL — the score is the source of truth for severity classification.
 	if sev == SeverityAlert {
 		d.alertCooldown = cfg.AlertCooldownTicks
 	} else if d.alertCooldown > 0 {
 		d.alertCooldown--
-		if sev == SeverityNone {
-			sev = SeverityWarning
+		if sev < SeverityNormal {
+			sev = SeverityNormal
 		}
 	}
 
@@ -254,6 +260,8 @@ func (d *Detector) severity(score float64) Severity {
 		return SeverityAlert
 	case score >= cfg.WarningScore:
 		return SeverityWarning
+	case score >= cfg.FastThreshold:
+		return SeverityNormal
 	default:
 		return SeverityNone
 	}
@@ -275,7 +283,10 @@ func (d *Detector) severityMultiScaleWith(score float64, cfg Config) Severity {
 		if score >= confirmThreshold {
 			return SeverityAlert
 		}
-		return SeverityWarning
+		if score >= cfg.WarningScore {
+			return SeverityWarning
+		}
+		return SeverityNormal
 	}
 	return SeverityNone
 }

@@ -16,7 +16,10 @@ const DetectionRow: React.FC<{ detection: Detection; isNew?: boolean }> = React.
   ({ detection: d, isNew }) => {
     const [expanded, setExpanded] = useState(false);
 
+    const isNormal = d.severity === 'NORMAL';
+
     const rowBg =
+      isNormal                 ? 'hover:bg-neon-green/5 border-l-2 border-l-neon-green/30' :
       d.severity === 'ALERT'   ? 'hover:bg-neon-red/5 border-l-2 border-l-neon-red/50' :
       d.severity === 'WARNING' ? 'hover:bg-neon-yellow/5 border-l-2 border-l-neon-yellow/40' :
       'hover:bg-white/3 border-l-2 border-l-transparent';
@@ -59,7 +62,9 @@ const DetectionRow: React.FC<{ detection: Detection; isNew?: boolean }> = React.
             )}
           </td>
           <td className="px-3 py-2">
-            <ActionBadge action={d.action} />
+            {isNormal
+              ? <span className="font-mono text-slate-600 text-[10px]">—</span>
+              : <ActionBadge action={d.action} />}
           </td>
           <td className="px-3 py-2 text-slate-500">
             {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
@@ -124,9 +129,10 @@ export const DetectionStream: React.FC = () => {
   const pageItems = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const filterButtons: { label: string; value: typeof severityFilter }[] = [
-    { label: 'ALL', value: 'ALL' },
-    { label: 'ALERT', value: 'ALERT' },
+    { label: 'ALL',     value: 'ALL'     },
+    { label: 'ALERT',   value: 'ALERT'   },
     { label: 'WARNING', value: 'WARNING' },
+    { label: 'NORMAL',  value: 'NORMAL'  },
   ];
 
   return (
@@ -163,6 +169,7 @@ export const DetectionStream: React.FC = () => {
                 severityFilter === value
                   ? value === 'ALERT'   ? 'bg-neon-red/20 text-neon-red'
                   : value === 'WARNING' ? 'bg-neon-yellow/20 text-neon-yellow'
+                  : value === 'NORMAL'  ? 'bg-neon-green/20 text-neon-green'
                   : 'bg-neon-blue/20 text-neon-blue'
                   : 'text-slate-500 hover:text-slate-300'
               }`}

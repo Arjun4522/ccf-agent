@@ -34,8 +34,8 @@ interface AppState {
   // ── Stream control ───────────────────────────────────────────────────────────
   streamPaused: boolean;
   toggleStreamPause: () => void;
-  severityFilter: 'ALL' | 'WARNING' | 'ALERT';
-  setSeverityFilter: (f: 'ALL' | 'WARNING' | 'ALERT') => void;
+  severityFilter: 'ALL' | 'NORMAL' | 'WARNING' | 'ALERT';
+  setSeverityFilter: (f: 'ALL' | 'NORMAL' | 'WARNING' | 'ALERT') => void;
   pidSearch: string;
   setPidSearch: (s: string) => void;
 

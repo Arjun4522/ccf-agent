@@ -53,8 +53,9 @@ export const Badge: React.FC<BadgeProps> = ({
 // Convenience wrappers
 export const SeverityBadge: React.FC<{ severity: Severity }> = ({ severity }) => {
   const map = {
-    ALERT:   { variant: 'red'    as const, pulse: true, dot: true },
-    WARNING: { variant: 'yellow' as const, pulse: true, dot: true },
+    ALERT:   { variant: 'red'    as const, pulse: true,  dot: true  },
+    WARNING: { variant: 'yellow' as const, pulse: true,  dot: true  },
+    NORMAL:  { variant: 'green'  as const, pulse: false, dot: true  },
     NONE:    { variant: 'gray'   as const, pulse: false, dot: false },
   };
   const { variant, pulse, dot } = map[severity];
